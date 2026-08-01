@@ -1,0 +1,45 @@
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+  traefik:
+    address: ":8080"
+
+providers:
+  docker:
+    exposedByDefault: false
+    network: pki-sentinel
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+certificatesResolvers:
+  internal:
+    acme:
+      caServer: http://vault:8200/v1/pki_int/acme/directory
+      email: pki-sentinel@example.invalid
+      storage: /acme/acme.json
+      tlsChallenge: {}
+
+api:
+  dashboard: true
+  insecure: true
+
+metrics:
+  prometheus:
+    addEntryPointsLabels: true
+    addServicesLabels: true
+
+accessLog:
+  format: json
+  filePath: /var/log/traefik/access.log
+
+log:
+  level: INFO
+  format: json

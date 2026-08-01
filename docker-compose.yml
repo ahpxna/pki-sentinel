@@ -52,3 +52,57 @@ services:
       timeout: 3s
       retries: 24
       start_period: 5s
+
+  traefik:
+    image: ${TRAEFIK_IMAGE}
+    container_name: pki-traefik
+    networks:
+      pki-sentinel:
+        # api.internal / probe.internal must resolve inside the Docker network
+        # so Vault's ACME server can reach the tls-alpn-01 challenge responder
+        # (Traefik) by SNI hostname. Verify with:
+        #   docker compose exec vault getent hosts api.internal
+        aliases:
+          - api.internal
+          - probe.internal
+    ports:
+      - "${TRAEFIK_HTTP_PORT}:80"
+      - "${TRAEFIK_HTTPS_PORT}:443"
+      - "${TRAEFIK_DASHBOARD_PORT}:8080"
+    volumes:
+      - ./config/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./config/traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./.data/traefik/acme:/acme
+      - ./.data/traefik/logs:/var/log/traefik
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      vault:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  demo-api:
+    image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/demo-api:local
+    build:
+      context: ./services/demo-api
+    container_name: pki-demo-api
+    networks: [pki-sentinel]
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_APPROLE_ENV_FILE: /run/secrets/demo-api.env
+      DEMO_API_LISTEN: ":8000"
+    volumes:
+      - ./.data/approle/demo-api.env:/run/secrets/demo-api.env:ro
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.demo-api.rule=Host(`api.internal`)
+      - traefik.http.routers.demo-api.entrypoints=websecure
+      - traefik.http.routers.demo-api.tls.certresolver=internal
+      - traefik.http.services.demo-api.loadbalancer.server.port=8000
+    depends_on:
+      vault:
+        condition: service_healthy
