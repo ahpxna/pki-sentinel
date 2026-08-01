@@ -5,19 +5,50 @@ networks:
     driver: bridge
 
 services:
-  vault:
+  # Demo stand-in for a cloud KMS. Holds a transit key used to auto-unseal the
+  # primary Vault. In production this would be AWS/GCP/Azure KMS or an HSM —
+  # see docs/adr/0002-auto-unseal-tradeoffs.md.
+  vault-seal:
     image: ${VAULT_IMAGE}
-    container_name: pki-vault
+    container_name: pki-vault-seal
     cap_add: ["IPC_LOCK"]
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID}
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_SEAL_TOKEN}
       VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
       VAULT_ADDR: http://127.0.0.1:8200
-    ports: ["${VAULT_PORT}:8200"]
+    ports: ["${VAULT_SEAL_PORT}:8200"]
     networks: [pki-sentinel]
     healthcheck:
       test: ["CMD", "vault", "status"]
       interval: 5s
       timeout: 3s
       retries: 12
+      start_period: 5s
+
+  vault:
+    image: ${VAULT_IMAGE}
+    container_name: pki-vault
+    cap_add: ["IPC_LOCK"]
+    command: server -config=/vault/config/vault.hcl
+    environment:
+      VAULT_ADDR: http://127.0.0.1:8200
+      # Transit auto-unseal client token for vault-seal. Vault's transit seal
+      # stanza reads this from VAULT_TOKEN when no `token` field is set in
+      # the seal config (verified against `vault server -help` and container
+      # logs — see docs/adr/0002-auto-unseal-tradeoffs.md for the writeup).
+      VAULT_TOKEN: ${VAULT_SEAL_TOKEN}
+    ports: ["${VAULT_PORT}:8200"]
+    networks: [pki-sentinel]
+    volumes:
+      - ./config/vault:/vault/config:ro
+      - ./.data/vault:/vault/data
+    depends_on:
+      vault-seal:
+        condition: service_healthy
+    healthcheck:
+      # Must tolerate "sealed"/"uninitialized" states before bootstrap runs.
+      test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:8200/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
       start_period: 5s

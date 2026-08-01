@@ -35,3 +35,27 @@ logs: ## Tail logs for all services
 .PHONY: lint
 lint: ## Run all linters (placeholder in Phase 0)
 	@echo "lint: nothing to check yet (Phase 0)"
+
+# ── Phase 1: Terraform / bootstrap ────────────────────────────────────────
+
+.PHONY: bootstrap
+bootstrap: up ## Full bootstrap: start stack, init Vault, terraform apply
+	./scripts/bootstrap.sh
+
+.PHONY: tf-init
+tf-init: ## terraform init in terraform/bootstrap
+	cd terraform/bootstrap && terraform init -input=false
+
+.PHONY: tf-apply
+tf-apply: ## terraform apply in terraform/bootstrap
+	cd terraform/bootstrap && terraform apply -auto-approve -input=false
+
+.PHONY: tf-destroy
+tf-destroy: ## terraform destroy in terraform/bootstrap
+	cd terraform/bootstrap && terraform destroy -auto-approve -input=false
+
+.PHONY: ca-chain
+ca-chain: ## Export the pki_int CA chain to .data/ca_chain.pem for host-side curl
+	@mkdir -p .data
+	curl -s "http://localhost:$${VAULT_PORT:-8200}/v1/pki_int/ca_chain" -o .data/ca_chain.pem
+	@test -s .data/ca_chain.pem && echo "wrote .data/ca_chain.pem" || (echo "ca-chain: empty response" >&2; exit 1)
