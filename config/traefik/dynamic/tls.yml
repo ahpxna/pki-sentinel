@@ -1,0 +1,12 @@
+# Placeholder for static TLS options / middlewares added in later phases.
+# Kept as a separate file so Traefik's file provider has something to watch
+# from Phase 2 onward without requiring a restart when new dynamic config
+# (middlewares, extra routers) is added.
+http:
+  middlewares:
+    secure-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        contentTypeNosniff: true
+        frameDeny: true

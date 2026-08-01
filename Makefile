@@ -59,3 +59,9 @@ ca-chain: ## Export the pki_int CA chain to .data/ca_chain.pem for host-side cur
 	@mkdir -p .data
 	curl -s "http://localhost:$${VAULT_PORT:-8200}/v1/pki_int/ca_chain" -o .data/ca_chain.pem
 	@test -s .data/ca_chain.pem && echo "wrote .data/ca_chain.pem" || (echo "ca-chain: empty response" >&2; exit 1)
+
+# ── Phase 2: ACME / Traefik / demo-api ─────────────────────────────────────
+
+.PHONY: demo-api-logs
+demo-api-logs: ## Tail demo-api logs
+	docker compose logs -f --tail=100 demo-api
