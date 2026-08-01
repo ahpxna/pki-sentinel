@@ -1,0 +1,8 @@
+.git
+.data
+*.md
+docs/
+.github/
+tests/
+terraform/
+**/*.tfstate*

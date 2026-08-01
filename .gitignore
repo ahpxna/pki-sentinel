@@ -1,0 +1,16 @@
+.env
+.data/
+*.pem
+*.key
+*.crt
+!docs/**/*.crt
+terraform/**/.terraform/
+terraform/**/*.tfstate*
+terraform/**/.terraform.lock.hcl
+services/**/bin/
+.DS_Store
+/bin/
+*.log
+coverage.out
+plan.out
+plan.json
