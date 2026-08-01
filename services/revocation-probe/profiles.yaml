@@ -1,0 +1,39 @@
+# Controls which client profiles are enabled, poll interval, per-profile
+# timeout, and max attempts. Consumed by internal/config.
+
+poll_interval: 2s
+max_wait: 180s
+
+profiles:
+  - name: openssl-ocsp-direct
+    enabled: true
+    timeout: 5s
+  - name: curl-cert-status
+    enabled: true
+    timeout: 5s
+  - name: curl-default
+    enabled: true
+    timeout: 5s
+  - name: go-tls-default
+    enabled: true
+    timeout: 5s
+  - name: go-tls-ocsp
+    enabled: true
+    timeout: 5s
+  - name: python-requests
+    enabled: true
+    timeout: 5s
+  - name: crl-check
+    enabled: true
+    timeout: 5s
+  # Optional eighth profile. Disabled by default: chromium-headless is heavy
+  # (needs a full Chromium install in the probe image) and its CRLSet
+  # behaviour against a private CA is uninformative — Chrome's revocation
+  # checking is driven by Google's centrally-curated CRLSet, which never
+  # contains entries for a private/internal CA, so the profile would always
+  # report "accepted" regardless of whether the client software itself is
+  # capable of checking revocation. Documented here rather than silently
+  # omitted; gated behind the `chromium` build tag if ever implemented.
+  - name: chromium-headless
+    enabled: false
+    timeout: 10s

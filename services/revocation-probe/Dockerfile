@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+#
+# Deliberately NOT distroless: profiles shell out to curl, openssl, python3,
+# and tc. See docs/adr/0006-alpine-over-distroless-for-probe.md and
+# SECURITY.md for the reasoning and the compensating controls (non-root
+# user, capability scoped to CAP_NET_ADMIN only, image scanned in CI).
+FROM golang:1.22-alpine AS builder
+WORKDIR /src
+COPY go.mod ./
+RUN go mod download 2>/dev/null || true
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/probe ./cmd/probe
+
+FROM alpine:3.20
+RUN apk add --no-cache curl openssl python3 py3-requests iproute2 ca-certificates libcap \
+    && addgroup -S probe && adduser -S probe -G probe
+COPY --from=builder /out/probe /usr/local/bin/probe
+# `tc` needs CAP_NET_ADMIN even when the container itself has it via
+# cap_add, because that grant applies to the root process, not arbitrary
+# non-root users. File capabilities on the tc binary let the non-root
+# `probe` user invoke it without running the whole process as root.
+RUN setcap cap_net_admin=+ep /sbin/tc
+COPY profiles.yaml /etc/pki-sentinel/profiles.yaml
+WORKDIR /etc/pki-sentinel
+USER probe
+EXPOSE 9110
+ENTRYPOINT ["probe"]
+CMD ["run", "--config", "/etc/pki-sentinel/profiles.yaml"]
