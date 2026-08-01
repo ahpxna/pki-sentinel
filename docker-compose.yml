@@ -106,3 +106,24 @@ services:
     depends_on:
       vault:
         condition: service_healthy
+
+  revocation-probe:
+    image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/revocation-probe:local
+    build:
+      context: ./services/revocation-probe
+    container_name: pki-revocation-probe
+    networks: [pki-sentinel]
+    cap_add: ["NET_ADMIN"] # required for --chaos tc netem sweeps (Step 3.7)
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_PUBLIC_ADDR: http://localhost:${VAULT_PORT}
+      PKI_DOMAIN: ${PKI_DOMAIN}
+    env_file:
+      - ./.data/approle/revocation-probe.env
+    ports: ["${PROBE_METRICS_PORT}:9110"]
+    volumes:
+      - ./docs/benchmarks/data:/etc/pki-sentinel/docs/benchmarks/data
+    restart: unless-stopped
+    depends_on:
+      vault:
+        condition: service_healthy

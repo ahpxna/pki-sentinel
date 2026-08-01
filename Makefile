@@ -65,3 +65,13 @@ ca-chain: ## Export the pki_int CA chain to .data/ca_chain.pem for host-side cur
 .PHONY: demo-api-logs
 demo-api-logs: ## Tail demo-api logs
 	docker compose logs -f --tail=100 demo-api
+
+# ── Phase 3: revocation-probe ──────────────────────────────────────────────
+
+.PHONY: demo-revoke
+demo-revoke: ## Run one probe cycle and pretty-print the detection table
+	./scripts/demo-revoke.sh
+
+.PHONY: chaos-sweep
+chaos-sweep: ## Sweep injected OCSP-path latency; writes docs/benchmarks/data/chaos-*.csv
+	./scripts/chaos.sh
