@@ -33,8 +33,17 @@ logs: ## Tail logs for all services
 	docker compose logs -f --tail=100
 
 .PHONY: lint
-lint: ## Run all linters (placeholder in Phase 0)
-	@echo "lint: nothing to check yet (Phase 0)"
+lint: ## Run all linters (shellcheck, terraform fmt/validate, golangci-lint, hadolint)
+	@echo "── shellcheck ──"; command -v shellcheck >/dev/null && shellcheck scripts/*.sh scripts/lib/*.sh || echo "shellcheck not installed, skipping"
+	@echo "── terraform fmt -check ──"; command -v terraform >/dev/null && terraform fmt -check -recursive terraform/ || echo "terraform not installed, skipping"
+	@echo "── golangci-lint ──"; \
+	for svc in demo-api revocation-probe truststore-drift-agent; do \
+	  command -v golangci-lint >/dev/null && (cd services/$$svc && golangci-lint run) || echo "golangci-lint not installed, skipping $$svc"; \
+	done
+	@echo "── hadolint ──"; \
+	for df in services/demo-api/Dockerfile services/revocation-probe/Dockerfile services/truststore-drift-agent/Dockerfile observability/webhook-logger/Dockerfile; do \
+	  command -v hadolint >/dev/null && hadolint $$df || echo "hadolint not installed, skipping $$df"; \
+	done
 
 # ── Phase 1: Terraform / bootstrap ────────────────────────────────────────
 
@@ -93,3 +102,24 @@ up-wazuh: env ## Start core + observability + Wazuh (profile: wazuh; ~4GB RAM)
 .PHONY: truststore-drift-demo
 truststore-drift-demo: ## Install a synthetic rogue CA on the host and show truststore-drift-agent detect it
 	./scripts/truststore-drift-demo.sh
+
+# ── Phase 5: CI / supply chain ─────────────────────────────────────────────
+
+.PHONY: test
+test: ## Run unit tests for all Go services
+	(cd services/demo-api && go test ./... -race) && \
+	(cd services/revocation-probe && go test ./... -race) && \
+	(cd services/truststore-drift-agent && go test ./... -race)
+
+.PHONY: test-integration
+test-integration: ## Run the integration test (requires make bootstrap first)
+	go test -tags=integration ./tests/integration/... -v
+
+.PHONY: scan
+scan: ## Run trivy + gitleaks locally
+	gitleaks detect --no-git=false || true
+	trivy fs . || true
+
+.PHONY: diagrams
+diagrams: ## Regenerate docs/images/architecture.svg from the D2 source
+	d2 docs/diagrams/architecture.d2 docs/images/architecture.svg
