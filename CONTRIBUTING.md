@@ -2,9 +2,13 @@
 
 ## Local dev setup
 
-1. Install Docker, Docker Compose v2, `terraform` >= 1.9, `go` >= 1.22.
-2. `cp .env.example .env`
-3. `make up` then `make bootstrap`.
+Install Docker, Docker Compose v2, `terraform` >= 1.9, and `go` >= 1.22, then:
+
+```bash
+cp .env.example .env
+make up
+make bootstrap
+```
 
 ## Commit convention
 
