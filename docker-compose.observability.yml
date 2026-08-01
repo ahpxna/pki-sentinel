@@ -1,0 +1,87 @@
+# Split from docker-compose.yml so the core stack (`make up`) stays
+# lightweight. Started together via `make up-full`
+# (-f docker-compose.yml -f docker-compose.observability.yml).
+networks:
+  pki-sentinel:
+    external: false
+
+services:
+  prometheus:
+    image: ${PROMETHEUS_IMAGE}
+    container_name: pki-prometheus
+    networks: [pki-sentinel]
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - ./.data/prometheus:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports: ["${PROMETHEUS_PORT}:9090"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/-/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  alertmanager:
+    image: ${ALERTMANAGER_IMAGE}
+    container_name: pki-alertmanager
+    networks: [pki-sentinel]
+    volumes:
+      - ./observability/alertmanager/config.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./.data/alertmanager/slack_url:/etc/alertmanager/slack_url:ro
+      - ./.data/alertmanager:/alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports: ["${ALERTMANAGER_PORT}:9093"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9093/-/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  webhook-logger:
+    image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/webhook-logger:local
+    build:
+      context: ./observability/webhook-logger
+    container_name: pki-webhook-logger
+    networks: [pki-sentinel]
+
+  grafana:
+    image: ${GRAFANA_IMAGE}
+    container_name: pki-grafana
+    networks: [pki-sentinel]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./.data/grafana:/var/lib/grafana
+    ports: ["${GRAFANA_PORT}:3000"]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  node-exporter:
+    image: ${NODE_EXPORTER_IMAGE}
+    container_name: pki-node-exporter
+    networks: [pki-sentinel]
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys

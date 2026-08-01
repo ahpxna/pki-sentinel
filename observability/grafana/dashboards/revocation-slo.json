@@ -1,0 +1,106 @@
+{
+  "title": "Revocation SLO",
+  "uid": "pki-revocation-slo",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "30s",
+  "tags": ["pki-sentinel", "assurance"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Soft-fails (last 24h)",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(increase(pki_revocation_softfail_total[24h]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "bargauge",
+      "title": "Detection time p50/p95 per profile",
+      "gridPos": { "h": 8, "w": 12, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, profile) (rate(pki_revocation_detection_seconds_bucket[1h])))",
+          "legendFormat": "{{profile}} p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, profile) (rate(pki_revocation_detection_seconds_bucket[1h])))",
+          "legendFormat": "{{profile}} p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Profile x Method x Last Outcome — does your client actually check?",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "pki_revocation_detected_total",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        },
+        {
+          "expr": "pki_revocation_softfail_total",
+          "format": "table",
+          "instant": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "OCSP responder latency",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(pki_ocsp_responder_latency_seconds_bucket[5m]))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "heatmap",
+      "title": "Soft-fail rate vs injected OCSP-path delay (chaos sweep)",
+      "description": "Direct descendant of the CYB 260 soft-fail-rate figure. See docs/benchmarks/ocsp-softfail-thresholds.md.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "pki_chaos_softfail_rate",
+          "legendFormat": "{{delay_ms}}ms",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

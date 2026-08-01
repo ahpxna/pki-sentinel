@@ -75,3 +75,21 @@ demo-revoke: ## Run one probe cycle and pretty-print the detection table
 .PHONY: chaos-sweep
 chaos-sweep: ## Sweep injected OCSP-path latency; writes docs/benchmarks/data/chaos-*.csv
 	./scripts/chaos.sh
+
+# ── Phase 4: observability & Wazuh ─────────────────────────────────────────
+
+.PHONY: up-full
+up-full: env ## Start core + observability (Prometheus/Grafana/Alertmanager)
+	./scripts/gen-slack-url-file.sh
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+	@$(MAKE) status
+
+.PHONY: up-wazuh
+up-wazuh: env ## Start core + observability + Wazuh (profile: wazuh; ~4GB RAM)
+	./scripts/gen-slack-url-file.sh
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.wazuh.yml --profile wazuh up -d
+	@$(MAKE) status
+
+.PHONY: truststore-drift-demo
+truststore-drift-demo: ## Install a synthetic rogue CA on the host and show truststore-drift-agent detect it
+	./scripts/truststore-drift-demo.sh

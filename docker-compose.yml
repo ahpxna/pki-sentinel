@@ -42,6 +42,7 @@ services:
     volumes:
       - ./config/vault:/vault/config:ro
       - ./.data/vault:/vault/data
+      - ./.data/vault-logs:/vault/logs
     depends_on:
       vault-seal:
         condition: service_healthy
@@ -127,3 +128,23 @@ services:
     depends_on:
       vault:
         condition: service_healthy
+
+  # Not started by `up`/`up-full` — invoked ad hoc via
+  # `docker compose run --rm truststore-drift-agent baseline|check ...`
+  # (see `make truststore-drift-demo`), or wired into cron/CI as a gate.
+  truststore-drift-agent:
+    image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/truststore-drift-agent:local
+    build:
+      context: ./services/truststore-drift-agent
+    container_name: pki-truststore-drift-agent
+    profiles: ["tools"]
+    networks: [pki-sentinel]
+    volumes:
+      - ./.data/truststore:/data
+      # A dedicated, writable demo trust store — NOT the developer's real
+      # host trust store — so `make truststore-drift-demo` can safely
+      # install a synthetic rogue CA without touching the host. See
+      # scripts/truststore-drift-demo.sh.
+      - ./.data/truststore/extra-cas:/usr/local/share/ca-certificates
+      - /etc/ssl/certs:/etc/ssl/certs:ro
+    working_dir: /data

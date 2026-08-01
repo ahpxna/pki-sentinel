@@ -1,0 +1,41 @@
+{
+  "title": "Trust Store Drift",
+  "uid": "pki-trust-drift",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "1m",
+  "tags": ["pki-sentinel", "assurance"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Unknown roots currently detected",
+      "description": "truststore-drift-agent: SHA-256(SPKI) roots present in the host trust store but absent from the signed baseline. Any non-zero value here means an unauthorized CA has been installed. See docs/runbooks and the truststore-drift-agent README for why this can't be detected at the TLS layer.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "pki_truststore_unknown_roots", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Unknown roots over time",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "pki_truststore_unknown_roots", "refId": "A" }]
+    }
+  ]
+}
