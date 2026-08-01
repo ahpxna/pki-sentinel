@@ -1,0 +1,53 @@
+# Runbook: Revocation soft-fail detected
+
+**Trigger:** `RevocationSoftFailDetected` (see `observability/prometheus/rules/pki-slo.yml`)
+
+**Impact:** a client profile with `method != "none"` accepted a certificate
+that Vault had already revoked. This means a client that is *supposed* to
+check revocation status failed to detect it — this is a real enforcement
+gap, not the expected "structurally blind" behavior of `method="none"`
+profiles (see [ADR-0007](../adr/0007-alerting-on-method-not-none-only.md)).
+
+## Immediate actions
+
+1. Identify the affected profile and method from the alert labels:
+
+   ```bash
+   curl -s "http://localhost:${ALERTMANAGER_PORT:-9093}/api/v2/alerts" | jq '.[] | select(.labels.alertname=="RevocationSoftFailDetected")'
+   ```
+
+2. Confirm the OCSP responder and CRL are healthy (a soft-fail can be a
+   symptom of a stale/unreachable responder, not just a client defect):
+
+   ```bash
+   curl -s "http://localhost:${VAULT_PORT:-8200}/v1/pki_int/ocsp" -o /dev/null -w '%{http_code}\n'
+   curl -s "http://localhost:${PROMETHEUS_PORT:-9090}/api/v1/query?query=pki_crl_age_seconds" | jq '.data.result'
+   ```
+
+3. Re-run a manual cycle to confirm the finding is reproducible, not a
+   one-off flake:
+
+   ```bash
+   make demo-revoke
+   ```
+
+4. If reproducible, check whether the affected client's TLS stack or
+   configuration changed recently (e.g. a library upgrade that dropped
+   `--cert-status` / must-staple support).
+
+## Verification
+
+```bash
+# after remediation, confirm the same cycle now shows "rejected" for the affected profile
+make demo-revoke
+curl -s "http://localhost:${PROBE_METRICS_PORT:-9110}/metrics" | grep pki_revocation_detected_total
+```
+
+## Post-incident
+
+- If the root cause was a genuine client misconfiguration, document the fix
+  and consider adding a regression check.
+- If the root cause was infrastructure (OCSP responder degraded), see
+  [`ocsp-responder-down.md`](ocsp-responder-down.md).
+- Update `docs/benchmarks/` if this reveals a new soft-fail condition worth
+  tracking as a repeatable measurement.

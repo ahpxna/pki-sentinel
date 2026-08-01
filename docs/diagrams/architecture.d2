@@ -1,0 +1,34 @@
+# pki-sentinel architecture — regenerate the SVG with `make diagrams`
+# (requires the `d2` CLI: https://d2lang.com)
+
+issuance: Issuance plane {
+  root_ca: "Vault: pki_root\n(Root CA, offline-style)"
+  int_ca: "Vault: pki_int\n(Issuing CA, ACME, CRL/OCSP)"
+  traefik: "Traefik\n(ACME client, TLS edge)"
+  demo_api: "demo-api\n(AppRole + KV + client cert)"
+
+  root_ca -> int_ca: signs
+  int_ca -> traefik: ACME
+  int_ca -> demo_api: client cert
+}
+
+assurance: Assurance plane (the differentiator) {
+  style.fill: "#2b3a4a"
+  probe: "revocation-probe\nissue canary -> revoke -> poll 7 client profiles"
+  drift: "truststore-drift-agent\nSPKI hash diff vs signed baseline"
+}
+
+governance: Governance plane {
+  prometheus: Prometheus
+  grafana: Grafana dashboards
+  alertmanager: "Alertmanager -> Slack / webhook-logger"
+  wazuh: "Wazuh: Vault audit decoders + rules"
+
+  prometheus -> grafana
+  prometheus -> alertmanager
+}
+
+assurance.probe -> issuance.int_ca: canary issue/revoke
+assurance.probe -> governance.prometheus: pki_revocation_* metrics
+assurance.drift -> governance.prometheus: pki_truststore_unknown_roots
+issuance.int_ca -> governance.wazuh: file audit device
