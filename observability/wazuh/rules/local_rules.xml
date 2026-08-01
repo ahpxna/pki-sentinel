@@ -1,0 +1,63 @@
+<!--
+  Custom rules for Vault audit-log events, keyed on JSON fields produced by
+  observability/wazuh/decoders/vault_audit.xml and the truststore-drift-agent
+  event stream.
+
+  Rule 100102 is the highest-value rule in this set: with a properly
+  bootstrapped hierarchy, pki_root is written to exactly once (during
+  Terraform apply in Phase 1). Any later write is either an operator
+  mistake or an attack, and should page, not just log.
+-->
+<group name="pki-sentinel,vault_audit,">
+
+  <rule id="100100" level="0">
+    <decoded_as>vault-audit</decoded_as>
+    <field name="type">\.+</field>
+    <description>Vault audit event.</description>
+  </rule>
+
+  <rule id="100101" level="5">
+    <if_sid>100100</if_sid>
+    <field name="request.path">^pki_int/revoke</field>
+    <description>Certificate revoked via pki_int.</description>
+    <group>pki_revocation,</group>
+  </rule>
+
+  <rule id="100102" level="12">
+    <if_sid>100100</if_sid>
+    <field name="request.path">^pki_root/</field>
+    <field name="request.operation">^(create|update|delete)$</field>
+    <description>Root CA mount written — should essentially never happen after initial bootstrap.</description>
+    <group>pki_root_write,</group>
+  </rule>
+
+  <rule id="100103" level="8">
+    <if_sid>100100</if_sid>
+    <field name="request.path">^auth/</field>
+    <field name="error">\.+</field>
+    <description>Vault auth failure.</description>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <rule id="100104" level="10" frequency="5" timeframe="60">
+    <if_matched_sid>100103</if_matched_sid>
+    <same_field>remote_address</same_field>
+    <description>Possible AppRole brute force: 5+ auth failures in 60s from the same source.</description>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <rule id="100105" level="10">
+    <if_sid>100100</if_sid>
+    <field name="request.path">^sys/policy</field>
+    <field name="request.operation">^(create|update|delete)$</field>
+    <description>Vault policy modified.</description>
+    <group>pki_policy_change,</group>
+  </rule>
+
+  <rule id="100106" level="12">
+    <field name="event">^unknown_root$</field>
+    <description>truststore-drift-agent: unauthorized root CA installed.</description>
+    <group>truststore_drift,</group>
+  </rule>
+
+</group>

@@ -1,0 +1,55 @@
+groups:
+  - name: pki-sentinel-slo
+    rules:
+      - alert: RevocationSoftFailDetected
+        expr: increase(pki_revocation_softfail_total{method!="none"}[30m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Client profile {{ $labels.profile }} accepted a REVOKED certificate"
+          runbook_url: "https://github.com/OWNER/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"
+
+      - alert: RevocationDetectionSLOBreach
+        expr: histogram_quantile(0.95, sum by (le, profile) (rate(pki_revocation_detection_seconds_bucket[1h]))) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 revocation detection time for {{ $labels.profile }} exceeds 30s"
+          runbook_url: "https://github.com/OWNER/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"
+
+      - alert: OCSPResponderDown
+        expr: pki_ocsp_responder_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OCSP responder appears down"
+          runbook_url: "https://github.com/OWNER/pki-sentinel/blob/main/docs/runbooks/ocsp-responder-down.md"
+
+      - alert: CRLStale
+        expr: pki_crl_age_seconds > 86400
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CRL has not been rebuilt in over 24h"
+          runbook_url: "https://github.com/OWNER/pki-sentinel/blob/main/docs/runbooks/ocsp-responder-down.md"
+
+      - alert: CertificateExpiringSoon
+        expr: (pki_cert_not_after_timestamp_seconds - time()) < 7*24*3600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Certificate {{ $labels.cn }} (serial {{ $labels.serial }}) expires within 7 days"
+
+      - alert: ProbeCycleFailing
+        expr: increase(pki_revocation_cycle_total{result="error"}[1h]) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "revocation-probe has had more than 2 failed cycles in the last hour"
+          runbook_url: "https://github.com/OWNER/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"

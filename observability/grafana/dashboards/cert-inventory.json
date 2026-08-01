@@ -1,0 +1,58 @@
+{
+  "title": "Certificate Inventory",
+  "uid": "pki-cert-inventory",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "1m",
+  "tags": ["pki-sentinel", "issuance"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Tracked certificates: CN, serial, days to expiry",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "(pki_cert_not_after_timestamp_seconds - time()) / 86400",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{cn}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Certificates expiring within 7 days",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "count((pki_cert_not_after_timestamp_seconds - time()) < 7*24*3600)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "CRL age (seconds)",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "pki_crl_age_seconds", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "CRL entries",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "pki_crl_entries", "refId": "A" }]
+    }
+  ]
+}

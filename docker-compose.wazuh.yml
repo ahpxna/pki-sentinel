@@ -1,0 +1,29 @@
+# Wazuh single-node (manager + indexer + dashboard) is heavy — roughly 4GB
+# RAM. Kept behind the `wazuh` Compose profile and a separate `make
+# up-wazuh` target so the default clone experience stays light.
+#
+# NOTE: this file wires up the manager and mounts the custom decoder/rule
+# files; the indexer/dashboard images are intentionally left as commented
+# guidance rather than pinned here, since a full 3-node Wazuh stack has
+# its own certificate bootstrap that is out of scope for this reference
+# repo. Run `make up-wazuh` after reading docs/runbooks — the manager alone
+# is sufficient to exercise `wazuh-logtest` against the fixtures in
+# tests/fixtures/.
+networks:
+  pki-sentinel:
+    external: false
+
+services:
+  wazuh-manager:
+    image: wazuh/wazuh-manager:${WAZUH_VERSION}
+    container_name: pki-wazuh-manager
+    profiles: ["wazuh"]
+    networks: [pki-sentinel]
+    volumes:
+      - ./observability/wazuh/decoders/vault_audit.xml:/var/ossec/etc/decoders/vault_audit.xml:ro
+      - ./observability/wazuh/rules/local_rules.xml:/var/ossec/etc/rules/local_rules.xml:ro
+      - ./.data/vault-logs:/var/ossec/logs/vault:ro
+      - ./.data/wazuh/var-ossec:/var/ossec/data
+    environment:
+      INDEXER_URL: ""
+      FILEBEAT_SSL_VERIFICATION_MODE: none
