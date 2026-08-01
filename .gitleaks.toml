@@ -1,0 +1,8 @@
+title = "pki-sentinel gitleaks config"
+
+[extend]
+useDefault = true
+
+# No custom allowlist entries yet. Any addition here MUST include a dated
+# justification comment per Appendix B / Step 5.2 — unjustified ignores are
+# worse than no scanning.

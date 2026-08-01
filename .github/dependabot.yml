@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /services/demo-api
+    schedule: { interval: weekly }
+  - package-ecosystem: gomod
+    directory: /services/revocation-probe
+    schedule: { interval: weekly }
+  - package-ecosystem: gomod
+    directory: /services/truststore-drift-agent
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /services/demo-api
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /services/revocation-probe
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /services/truststore-drift-agent
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /observability/webhook-logger
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: terraform
+    directory: /terraform/bootstrap
+    schedule: { interval: weekly }

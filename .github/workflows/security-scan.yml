@@ -1,0 +1,121 @@
+name: security-scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1" # weekly — catches newly disclosed CVEs in unchanged images
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  fs-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL
+          exit-code: "1"
+          format: sarif
+          output: trivy-fs.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+
+  image-scan:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [demo-api, revocation-probe, truststore-drift-agent]
+    steps:
+      - uses: actions/checkout@v4
+      - name: build image
+        run: docker build -t pki-sentinel/${{ matrix.service }}:ci services/${{ matrix.service }}
+      - name: trivy image scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: pki-sentinel/${{ matrix.service }}:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: sarif
+          output: trivy-image-${{ matrix.service }}.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image-${{ matrix.service }}.sarif
+
+  iac-misconfig:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: trivy config scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: config
+          scan-ref: terraform/
+          severity: CRITICAL
+          exit-code: "1"
+      - name: checkov
+        uses: bridgecrewio/checkov-action@v12.2915.0
+        with:
+          directory: terraform/
+          soft_fail: false
+
+  opa-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.5"
+      - name: conftest
+        run: |
+          curl -sSL https://raw.githubusercontent.com/open-policy-agent/conftest/master/install.sh | sh
+          cd terraform/bootstrap
+          terraform init -backend=false -input=false
+          terraform plan -out=plan.out -input=false || true
+          terraform show -json plan.out > plan.json
+          ../../conftest test plan.json --policy ../../policy/opa/
+
+  sast-go:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [demo-api, revocation-probe, truststore-drift-agent]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: go
+          source-root: services/${{ matrix.service }}
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+
+  dependency-review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high

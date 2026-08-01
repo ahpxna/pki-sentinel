@@ -1,0 +1,86 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [demo-api, revocation-probe, truststore-drift-agent]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/pki-sentinel/${{ matrix.service }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/pki-sentinel/${{ matrix.service }}:${{ github.sha }}
+
+      - name: generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/pki-sentinel/${{ matrix.service }}:${{ github.ref_name }}
+          format: spdx-json
+          output-file: ${{ matrix.service }}-sbom.spdx.json
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: sign image (keyless)
+        run: |
+          cosign sign --yes "ghcr.io/${{ github.repository_owner }}/pki-sentinel/${{ matrix.service }}@${{ steps.build.outputs.digest }}"
+
+      - name: attest SBOM
+        run: |
+          cosign attest --predicate ${{ matrix.service }}-sbom.spdx.json --type spdxjson --yes \
+            "ghcr.io/${{ github.repository_owner }}/pki-sentinel/${{ matrix.service }}@${{ steps.build.outputs.digest }}"
+
+      - name: upload SBOM to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.service }}-sbom.spdx.json
+          generate_release_notes: true
+
+  # NOTE: the reusable SLSA container generator needs one call per image
+  # (image name + digest as job outputs from the `release` matrix job above).
+  # Left as a documented placeholder rather than wired end-to-end: the
+  # matrix `release` job's per-service digest needs to be exposed as a
+  # top-level job output before this can reference it correctly. See
+  # https://github.com/slsa-framework/slsa-github-generator for the
+  # generator_container_slsa3.yml required inputs (image, digest,
+  # registry-username, registry-password) before enabling this job.
+  # provenance:
+  #   needs: release
+  #   permissions:
+  #     actions: read
+  #     id-token: write
+  #     contents: write
+  #   uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+  #   with:
+  #     image: ghcr.io/OWNER/pki-sentinel/revocation-probe
+  #     digest: ${{ needs.release.outputs.digest }}
+  #     registry-username: ${{ github.actor }}
+  #   secrets:
+  #     registry-password: ${{ secrets.GITHUB_TOKEN }}

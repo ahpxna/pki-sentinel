@@ -1,0 +1,2 @@
+# Add entries ONLY with a dated justification comment, e.g.:
+# CVE-2024-XXXXX # 2026-08-01: false positive in unused code path, upstream fix pending

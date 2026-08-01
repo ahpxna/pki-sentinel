@@ -1,0 +1,147 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-go:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [demo-api, revocation-probe, truststore-drift-agent]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: services/${{ matrix.service }}/go.sum
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: services/${{ matrix.service }}
+
+  lint-iac:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.5"
+      - name: terraform fmt
+        run: terraform fmt -check -recursive terraform/
+      - name: terraform validate
+        working-directory: terraform/bootstrap
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+      - name: tflint
+        uses: terraform-linters/setup-tflint@v4
+      - run: tflint --chdir=terraform/bootstrap
+      - name: checkov
+        uses: bridgecrewio/checkov-action@v12.2915.0
+        with:
+          directory: terraform/
+
+  lint-docker:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dockerfile:
+          - services/demo-api/Dockerfile
+          - services/revocation-probe/Dockerfile
+          - services/truststore-drift-agent/Dockerfile
+          - observability/webhook-logger/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+
+  lint-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck scripts/*.sh scripts/lib/*.sh
+
+  lint-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: docker compose -f docker-compose.yml config -q
+      - run: docker compose -f docker-compose.yml -f docker-compose.observability.yml config -q
+      - run: docker compose -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.wazuh.yml config -q
+
+  unit-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [demo-api, revocation-probe, truststore-drift-agent]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: go test
+        working-directory: services/${{ matrix.service }}
+        run: go test ./... -race -coverprofile=coverage.out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: services/${{ matrix.service }}/coverage.out
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.5"
+      - name: start stack
+        run: |
+          cp .env.example .env
+          source scripts/lib/wait_for.sh
+          docker compose up -d
+          wait_for_http "http://localhost:8200/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204" 120
+      - name: bootstrap
+        run: ./scripts/bootstrap.sh
+      - name: build probe + truststore-drift-agent binaries
+        run: |
+          (cd services/revocation-probe && go build -o bin/probe ./cmd/probe)
+          (cd services/truststore-drift-agent && go build -o bin/truststore-drift-agent .)
+      - name: run one probe cycle
+        run: |
+          ROLE_ID=$(cut -d= -f2 <(grep VAULT_ROLE_ID .data/approle/revocation-probe.env))
+          SECRET_ID=$(cut -d= -f2 <(grep VAULT_SECRET_ID .data/approle/revocation-probe.env))
+          VAULT_ROLE_ID="$ROLE_ID" VAULT_SECRET_ID="$SECRET_ID" VAULT_ADDR=http://localhost:8200 \
+            ./services/revocation-probe/bin/probe run --once --output json \
+            --config services/revocation-probe/profiles.yaml > /tmp/cycle.json
+          cat /tmp/cycle.json
+      - name: go test -tags=integration
+        run: go test -tags=integration ./tests/integration/... -v
+      - name: step summary
+        if: always()
+        run: |
+          echo '### Detection table' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/cycle.json >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: upload logs on failure
+        if: failure()
+        run: mkdir -p artifacts && docker compose logs > artifacts/compose-logs.txt
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: integration-failure-logs
+          path: artifacts/
