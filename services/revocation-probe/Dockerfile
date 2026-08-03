@@ -11,7 +11,7 @@ RUN go mod download 2>/dev/null || true
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/probe ./cmd/probe
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN apk add --no-cache curl openssl python3 py3-requests iproute2 ca-certificates libcap \
     && addgroup -S probe && adduser -S probe -G probe
 COPY --from=builder /out/probe /usr/local/bin/probe
