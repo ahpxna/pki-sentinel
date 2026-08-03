@@ -1,16 +1,20 @@
+# ---- System junk ----
+.DS_Store
+*.pdf
+
+# ---- Terraform ----
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+!*.tfvars.example
+
+# ---- Go ----
+bin/
+vendor/
+
+# ---- Secrets & Environment ----
 .env
-.data/
 *.pem
 *.key
-*.crt
-!docs/**/*.crt
-terraform/**/.terraform/
-terraform/**/*.tfstate*
-terraform/**/.terraform.lock.hcl
-services/**/bin/
-.DS_Store
-/bin/
-*.log
-coverage.out
-plan.out
-plan.json
