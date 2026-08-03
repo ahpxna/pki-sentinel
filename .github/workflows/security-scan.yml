@@ -36,7 +36,7 @@ jobs:
           exit-code: "1"
           format: sarif
           output: trivy-fs.sarif
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@v4.37.4
         if: always()
         with:
           sarif_file: trivy-fs.sarif
@@ -59,7 +59,7 @@ jobs:
           exit-code: "1"
           format: sarif
           output: trivy-image-${{ matrix.service }}.sarif
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@v4.37.4
         if: always()
         with:
           sarif_file: trivy-image-${{ matrix.service }}.sarif
@@ -104,12 +104,12 @@ jobs:
         service: [demo-api, revocation-probe, truststore-drift-agent]
     steps:
       - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4.37.4
         with:
           languages: go
           source-root: services/${{ matrix.service }}
-      - uses: github/codeql-action/autobuild@v3
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/autobuild@v4.37.4
+      - uses: github/codeql-action/analyze@v4.37.4
 
   dependency-review:
     runs-on: ubuntu-latest
