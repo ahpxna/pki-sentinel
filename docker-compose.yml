@@ -46,6 +46,21 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # Normalize bind-mount ownership before Vault drops privileges to its
+  # packaged vault user (UID 100, GID 1000). Linux creates missing bind-mount
+  # directories as root; without this gate Raft cannot create vault.db.
+  vault-storage-init:
+    image: ${VAULT_IMAGE}
+    container_name: pki-vault-storage-init
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["chown -R 100:1000 /vault/data /vault/logs"]
+    volumes:
+      - ./.data/vault:/vault/data
+      - ./.data/vault-logs:/vault/logs
+    restart: "no"
+
   vault:
     image: ${VAULT_IMAGE}
     container_name: pki-vault
@@ -71,6 +86,8 @@ services:
       vault-seal:
         condition: service_healthy
       vault-seal-init:
+        condition: service_completed_successfully
+      vault-storage-init:
         condition: service_completed_successfully
     healthcheck:
       # Must tolerate "sealed"/"uninitialized" states before bootstrap runs.

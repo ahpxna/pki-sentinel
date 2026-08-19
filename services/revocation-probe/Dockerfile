@@ -4,7 +4,7 @@
 # and tc. See docs/adr/0006-alpine-over-distroless-for-probe.md and
 # SECURITY.md for the reasoning and the compensating controls (non-root
 # user, capability scoped to CAP_NET_ADMIN only, image scanned in CI).
-FROM golang:1.26.5-alpine3.23 AS builder
+FROM golang:1.26.6-alpine3.23 AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

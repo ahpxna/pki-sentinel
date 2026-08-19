@@ -2,7 +2,7 @@
 
 ## Local dev setup
 
-Install Docker, Docker Compose v2, Terraform 1.9.5, and Go 1.26.5, then:
+Install Docker, Docker Compose v2, Terraform 1.9.5, and Go 1.26.6, then:
 
 ```bash
 cp .env.example .env
