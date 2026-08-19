@@ -15,8 +15,8 @@ jobs:
       matrix:
         service: [demo-api, revocation-probe, truststore-drift-agent]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.5"
           cache-dependency-path: services/${{ matrix.service }}/go.sum
@@ -29,7 +29,7 @@ jobs:
   lint-iac:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.5"
@@ -58,7 +58,7 @@ jobs:
           - services/truststore-drift-agent/Dockerfile
           - observability/webhook-logger/Dockerfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: hadolint/hadolint-action@v3
         with:
           dockerfile: ${{ matrix.dockerfile }}
@@ -66,14 +66,14 @@ jobs:
   lint-shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck
         run: shellcheck scripts/*.sh scripts/lib/*.sh
 
   lint-compose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cp .env.example .env
       - run: docker compose -f docker-compose.yml config -q
       - run: docker compose -f docker-compose.yml -f docker-compose.observability.yml config -q
@@ -85,8 +85,8 @@ jobs:
       matrix:
         service: [demo-api, revocation-probe, truststore-drift-agent]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.5"
       - name: go test
@@ -101,8 +101,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.5"
       - uses: hashicorp/setup-terraform@v3
