@@ -1,5 +1,6 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
+COMPOSE_ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 
 .PHONY: help
 help: ## Show this help
@@ -24,7 +25,7 @@ down: ## Stop the core stack
 
 .PHONY: clean
 clean: ## Stop the stack and wipe all local state
-	docker compose --profile app --profile tools down -v --remove-orphans
+	docker compose --env-file $(COMPOSE_ENV_FILE) --profile app --profile tools down -v --remove-orphans
 	rm -rf .data
 	rm -f terraform/bootstrap/terraform.tfstate terraform/bootstrap/terraform.tfstate.backup
 
