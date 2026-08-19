@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pki-sentinel/pki-sentinel/services/demo-api/internal/vaultauth"
+	"github.com/ahpxna/pki-sentinel/services/demo-api/internal/vaultauth"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -41,7 +41,7 @@ var (
 )
 
 type certState struct {
-	mu        sync.RWMutex
+	mu         sync.RWMutex
 	commonName string
 	notAfter   time.Time
 	certPEM    string
@@ -114,10 +114,17 @@ func main() {
 	})
 	mux.Handle("/metrics", promhttp.Handler())
 
-	srv := &http.Server{Addr: listenAddr, Handler: mux}
+	srv := &http.Server{
+		Addr:              listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()

@@ -1,5 +1,9 @@
 # Trusted-CA MITM
 
+The aggregate scenario outcomes below are transcribed in
+[`data/prior-trusted-ca-mitm-summary.csv`](data/prior-trusted-ca-mitm-summary.csv).
+The original per-trial dataset and sample sizes are unavailable.
+
 ## Scenario A: untrusted CA
 
 An interception proxy presents a certificate signed by a CA the client does
@@ -19,10 +23,10 @@ kind.**
 
 This is not a bug in any client — it's the trust model functioning exactly
 as designed. A client that trusts a CA will, by construction, trust
-everything that CA signs. There is no TLS-layer signal to distinguish "your
-organization's legitimate root CA" from "a CA an attacker convinced you (or
-malware convinced your OS) to install." Detection has to happen one layer
-down, at the trust store itself, which is precisely what
+everything that CA signs. There is no TLS-layer signal to distinguish an
+organization's legitimate root CA from an unauthorized CA installed by an
+attacker or malware. Detection must occur at the trust-store layer, which is
+the function of
 [`truststore-drift-agent`](../../services/truststore-drift-agent/README.md)
 does: hash every root's SubjectPublicKeyInfo and diff against a signed
 baseline. A rogue CA installed after the baseline was taken shows up as an
@@ -30,5 +34,5 @@ baseline. A rogue CA installed after the baseline was taken shows up as an
 regardless of whether any TLS connection was ever intercepted.
 
 See `make truststore-drift-demo` for a runnable reproduction (installs a
-synthetic rogue CA into a container-local demo trust store — never the
-developer's real machine — and shows the agent detect it, exit code 1).
+synthetic rogue CA into a container-local demo trust store without modifying
+the host trust store, then verifies detection with exit code 1).

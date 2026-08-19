@@ -1,3 +1,3 @@
-module github.com/pki-sentinel/pki-sentinel/services/truststore-drift-agent
+module github.com/ahpxna/pki-sentinel/services/truststore-drift-agent
 
-go 1.22
+go 1.26

@@ -16,6 +16,12 @@ variable "vault_public_addr" {
   default     = "http://localhost:8200"
 }
 
+variable "vault_acme_addr" {
+  description = "HTTPS address exposed to ACME clients through the local Traefik TLS endpoint"
+  type        = string
+  default     = "https://vault-acme.internal"
+}
+
 variable "root_ttl_hours" {
   description = "Root CA max TTL, in hours."
   type        = number

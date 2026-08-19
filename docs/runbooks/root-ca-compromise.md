@@ -1,8 +1,8 @@
 # Runbook: Root CA compromise
 
 **Trigger:** confirmed or strongly suspected compromise of the root CA
-private key material (`pki_root` mount). This is the worst-case incident
-in the entire system — with a properly bootstrapped hierarchy, `pki_root`
+private key material (`pki_root` mount). This incident invalidates the
+entire trust hierarchy. With a properly bootstrapped hierarchy, `pki_root`
 is written to exactly once (see [rule 100102](../../observability/wazuh/rules/local_rules.xml),
 "Root CA mount written — should essentially never happen").
 
@@ -11,16 +11,16 @@ is written to exactly once (see [rule 100102](../../observability/wazuh/rules/lo
 
 ## Immediate actions
 
-1. Confirm the scope: was it the root key itself, or only the intermediate?
-   Check for rule 100102 firings, which should be extremely rare/never:
+1. Determine whether the compromise affects the root key or only the
+   intermediate. Check for rule 100102 events, which are expected only during
+   initial root creation:
 
    ```bash
    docker compose exec wazuh-manager grep -c '100102' /var/ossec/logs/alerts/alerts.json
    ```
 
-2. If the root key is confirmed compromised, treat the entire PKI as
-   burned. Do not attempt to "clean up" the existing hierarchy — stand up a
-   new root:
+2. If the root key is compromised, decommission the existing hierarchy and
+   establish a new root:
 
    ```bash
    cd terraform/bootstrap
@@ -42,15 +42,15 @@ is written to exactly once (see [rule 100102](../../observability/wazuh/rules/lo
 
 ```bash
 openssl x509 -in .data/ca_chain.pem -noout -subject -issuer
-# confirm the subject is the NEW root/intermediate, not the compromised one
+# Confirm that the subject identifies the replacement root and intermediate.
 ```
 
 ## Post-incident
 
 - Write a full postmortem; this incident class is severe enough to warrant
   external disclosure if any relying party's trust was affected.
-- Review why detection didn't happen sooner — rule 100102 exists precisely
-  to catch this class of event immediately, not after the fact.
+- Review the detection delay. Rule 100102 is intended to identify this event
+  class immediately.
 - Consider whether the production remediation in the README's "Production
   notes" (offline root on HSM/smartcard) would have prevented this
   specific compromise path.

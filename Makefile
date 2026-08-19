@@ -9,24 +9,29 @@ help: ## Show this help
 env: ## Create .env from .env.example if it does not exist
 	@test -f .env || cp .env.example .env
 
+.PHONY: prepare-dev-tls
+prepare-dev-tls: ## Generate the local-only TLS certificate used by the Vault ACME endpoint
+	./scripts/prepare-dev-tls.sh
+
 .PHONY: up
-up: env ## Start the core stack
+up: env prepare-dev-tls ## Start the core stack
 	docker compose up -d
 	@$(MAKE) status
 
 .PHONY: down
 down: ## Stop the core stack
-	docker compose down
+	docker compose --profile app --profile tools down --remove-orphans
 
 .PHONY: clean
 clean: ## Stop the stack and wipe all local state
-	docker compose down -v
+	docker compose --profile app --profile tools down -v --remove-orphans
 	rm -rf .data
+	rm -f terraform/bootstrap/terraform.tfstate terraform/bootstrap/terraform.tfstate.backup
 
 .PHONY: status
 status: ## Show container status and wait for Vault health
 	docker compose ps
-	@source scripts/lib/wait_for.sh && wait_for_http "http://localhost:$${VAULT_PORT:-8200}/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204" 60 '^(2|3|0)[0-9][0-9]$$'
+	@source scripts/lib/wait_for.sh && wait_for_http "http://localhost:$${VAULT_PORT:-8200}/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204" 60 '^20[04]$$'
 
 .PHONY: logs
 logs: ## Tail logs for all services
@@ -34,15 +39,15 @@ logs: ## Tail logs for all services
 
 .PHONY: lint
 lint: ## Run all linters (shellcheck, terraform fmt/validate, golangci-lint, hadolint)
-	@echo "── shellcheck ──"; command -v shellcheck >/dev/null && shellcheck scripts/*.sh scripts/lib/*.sh || echo "shellcheck not installed, skipping"
-	@echo "── terraform fmt -check ──"; command -v terraform >/dev/null && terraform fmt -check -recursive terraform/ || echo "terraform not installed, skipping"
+	@echo "── shellcheck ──"; if command -v shellcheck >/dev/null; then shellcheck scripts/*.sh scripts/lib/*.sh; else echo "shellcheck not installed, skipping"; fi
+	@echo "── terraform ──"; if command -v terraform >/dev/null; then terraform fmt -check -recursive terraform/ && (cd terraform/bootstrap && terraform init -backend=false -input=false >/dev/null && terraform validate); else echo "terraform not installed, skipping"; fi
 	@echo "── golangci-lint ──"; \
 	for svc in demo-api revocation-probe truststore-drift-agent; do \
-	  command -v golangci-lint >/dev/null && (cd services/$$svc && golangci-lint run) || echo "golangci-lint not installed, skipping $$svc"; \
+	  if command -v golangci-lint >/dev/null; then (cd services/$$svc && golangci-lint run) || exit; else echo "golangci-lint not installed, skipping $$svc"; fi; \
 	done
 	@echo "── hadolint ──"; \
 	for df in services/demo-api/Dockerfile services/revocation-probe/Dockerfile services/truststore-drift-agent/Dockerfile observability/webhook-logger/Dockerfile; do \
-	  command -v hadolint >/dev/null && hadolint $$df || echo "hadolint not installed, skipping $$df"; \
+	  if command -v hadolint >/dev/null; then hadolint $$df || exit; else echo "hadolint not installed, skipping $$df"; fi; \
 	done
 
 # ── Phase 1: Terraform / bootstrap ────────────────────────────────────────
@@ -88,15 +93,15 @@ chaos-sweep: ## Sweep injected OCSP-path latency; writes docs/benchmarks/data/ch
 # ── Phase 4: observability & Wazuh ─────────────────────────────────────────
 
 .PHONY: up-full
-up-full: env ## Start core + observability (Prometheus/Grafana/Alertmanager)
+up-full: env prepare-dev-tls ## Start core + observability (Prometheus/Grafana/Alertmanager)
 	./scripts/gen-slack-url-file.sh
-	docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile app up -d
 	@$(MAKE) status
 
 .PHONY: up-wazuh
-up-wazuh: env ## Start core + observability + Wazuh (profile: wazuh; ~4GB RAM)
+up-wazuh: env prepare-dev-tls ## Start core + observability + Wazuh (profile: wazuh; ~4GB RAM)
 	./scripts/gen-slack-url-file.sh
-	docker compose -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.wazuh.yml --profile wazuh up -d
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.wazuh.yml --profile app --profile wazuh up -d
 	@$(MAKE) status
 
 .PHONY: truststore-drift-demo
@@ -113,12 +118,17 @@ test: ## Run unit tests for all Go services
 
 .PHONY: test-integration
 test-integration: ## Run the integration test (requires make bootstrap first)
-	go test -tags=integration ./tests/integration/... -v
+	@test -s .data/last-cycle.json || (echo "missing .data/last-cycle.json; run 'make demo-revoke' first" >&2; exit 1)
+	@mkdir -p services/truststore-drift-agent/bin
+	cd services/truststore-drift-agent && go build -o bin/truststore-drift-agent .
+	cd tests/integration && PROBE_REPORT=../../.data/last-cycle.json \
+	  TRUSTSTORE_AGENT_BIN=../../services/truststore-drift-agent/bin/truststore-drift-agent \
+	  go test -tags=integration ./... -v
 
 .PHONY: scan
 scan: ## Run trivy + gitleaks locally
-	gitleaks detect --no-git=false || true
-	trivy fs . || true
+	@if command -v gitleaks >/dev/null; then gitleaks detect --no-git=false; else echo "gitleaks not installed, skipping"; fi
+	@if command -v trivy >/dev/null; then trivy fs .; else echo "trivy not installed, skipping"; fi
 
 .PHONY: diagrams
 diagrams: ## Regenerate docs/images/architecture.svg from the D2 source

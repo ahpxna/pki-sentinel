@@ -3,6 +3,7 @@
 
 poll_interval: 2s
 max_wait: 180s
+max_attempts: 90
 
 profiles:
   - name: openssl-ocsp-direct

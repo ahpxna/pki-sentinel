@@ -4,7 +4,7 @@ package main
 # server role — this combination allows arbitrarily broad wildcard-shaped
 # SANs to be issued, defeating the point of scoped, short-lived leaf certs.
 
-deny[msg] {
+deny contains msg if {
 	resource := input.resource_changes[_]
 	resource.type == "vault_pki_secret_backend_role"
 	after := resource.change.after

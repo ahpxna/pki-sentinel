@@ -38,11 +38,12 @@ resource "vault_approle_auth_backend_role_secret_id" "service" {
   role_name = vault_approle_auth_backend_role.service[each.key].role_name
 }
 
-# Gitignored via .data/. Written so services/Compose can mount them directly.
+# Store generated credentials under the ignored .data/ directory for direct
+# service and Compose mounts.
 resource "local_sensitive_file" "approle_env" {
-  for_each = local.approle_services
-  filename = "${path.module}/../../.data/approle/${each.key}.env"
-  content  = <<-ENV
+  for_each        = local.approle_services
+  filename        = "${path.module}/../../.data/approle/${each.key}.env"
+  content         = <<-ENV
     VAULT_ROLE_ID=${data.vault_approle_auth_backend_role_id.service[each.key].role_id}
     VAULT_SECRET_ID=${vault_approle_auth_backend_role_secret_id.service[each.key].secret_id}
   ENV

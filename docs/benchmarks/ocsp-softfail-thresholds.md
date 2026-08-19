@@ -11,6 +11,11 @@ client-side verification failure — the same discipline this repo uses for
 
 **Findings.**
 
+The aggregate rates below are transcribed in
+[`data/prior-ocsp-softfail-summary.csv`](data/prior-ocsp-softfail-summary.csv).
+The original per-trial observations and sample sizes are unavailable, so no
+confidence interval is claimed.
+
 - Detection was stable and fast at low injected delay.
 - Sharply unstable in the ~1950–2000ms band: soft-fail rate measured 0% up
   to ~1955ms, then 100% at 1960ms, 0% at 1970ms, 67% at 1980ms, and 100% at

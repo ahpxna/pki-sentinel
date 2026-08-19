@@ -20,6 +20,7 @@ type ProfileConfig struct {
 type Config struct {
 	PollInterval time.Duration   `yaml:"poll_interval"`
 	MaxWait      time.Duration   `yaml:"max_wait"`
+	MaxAttempts  int             `yaml:"max_attempts"`
 	Profiles     []ProfileConfig `yaml:"profiles"`
 
 	// Cycle interval and Vault/service wiring are supplied via flags/env in
@@ -42,7 +43,30 @@ func Load(path string) (*Config, error) {
 	if c.MaxWait == 0 {
 		c.MaxWait = 180 * time.Second
 	}
+	if c.MaxAttempts == 0 {
+		c.MaxAttempts = 90
+	}
+	if c.PollInterval < 0 || c.MaxWait < 0 || c.MaxAttempts < 0 {
+		return nil, fmt.Errorf("config: poll_interval, max_wait, and max_attempts must be positive")
+	}
+	for _, profile := range c.Profiles {
+		if profile.Enabled && profile.Timeout <= 0 {
+			return nil, fmt.Errorf("config: enabled profile %q must have a positive timeout", profile.Name)
+		}
+	}
 	return &c, nil
+}
+
+// TimeoutFor returns the configured timeout for a profile. The fallback is
+// intentionally bounded so a missing optional profile entry cannot hang a
+// cycle indefinitely.
+func (c *Config) TimeoutFor(name string) time.Duration {
+	for _, p := range c.Profiles {
+		if p.Name == name && p.Timeout > 0 {
+			return p.Timeout
+		}
+	}
+	return 5 * time.Second
 }
 
 // EnabledNames returns the names of all enabled profiles, in file order.

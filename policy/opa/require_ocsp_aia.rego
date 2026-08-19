@@ -4,7 +4,7 @@ package main
 # Without an OCSP AIA entry, clients that DO attempt revocation checking
 # have no responder URL to find in the first place.
 
-deny[msg] {
+deny contains msg if {
 	resource := input.resource_changes[_]
 	resource.type == "vault_pki_secret_backend_config_urls"
 	ocsp_servers := object.get(resource.change.after, "ocsp_servers", [])

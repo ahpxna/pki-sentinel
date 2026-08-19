@@ -9,7 +9,9 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	vaultapi "github.com/hashicorp/vault/api"
@@ -22,8 +24,10 @@ type CanaryCert struct {
 	CertPEM      string
 	KeyPEM       string
 	ChainPEM     string
+	IssuerPEM    string
 	SerialNumber string
 	Cert         *x509.Certificate
+	IssuerCert   *x509.Certificate
 }
 
 // Client wraps a logged-in Vault API client scoped to the `canary` role.
@@ -45,10 +49,68 @@ func Login(ctx context.Context, vaultAddr, roleID, secretID string) (*Client, er
 	if err != nil {
 		return nil, fmt.Errorf("issuer: configuring approle auth: %w", err)
 	}
-	if _, err := api.Auth().Login(ctx, auth); err != nil {
+	authInfo, err := api.Auth().Login(ctx, auth)
+	if err != nil {
 		return nil, fmt.Errorf("issuer: approle login: %w", err)
 	}
+	if authInfo == nil {
+		return nil, fmt.Errorf("issuer: approle login returned no auth info")
+	}
+	go maintainToken(ctx, api, auth, authInfo)
 	return &Client{API: api}, nil
+}
+
+// maintainToken renews the current token and re-authenticates when its
+// maximum TTL is reached. Without the re-login path, the long-running probe
+// silently stops working after token_max_ttl (four hours in Terraform).
+func maintainToken(ctx context.Context, api *vaultapi.Client, auth vaultapi.AuthMethod, secret *vaultapi.Secret) {
+	current := secret
+	for {
+		watcher, err := api.NewLifetimeWatcher(&vaultapi.LifetimeWatcherInput{Secret: current})
+		if err == nil {
+			go watcher.Start()
+			watching := true
+			for watching {
+				select {
+				case <-ctx.Done():
+					watcher.Stop()
+					return
+				case renewal := <-watcher.RenewCh():
+					if renewal != nil && renewal.Secret != nil {
+						log.Printf("issuer: token renewed, lease duration=%ds", renewal.Secret.LeaseDuration)
+					}
+				case watchErr := <-watcher.DoneCh():
+					if watchErr != nil {
+						log.Printf("issuer: token renewal stopped: %v; re-authenticating", watchErr)
+					}
+					watcher.Stop()
+					watching = false
+				}
+			}
+		} else {
+			log.Printf("issuer: failed to create token watcher: %v; re-authenticating", err)
+		}
+
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			next, loginErr := api.Auth().Login(ctx, auth)
+			if loginErr == nil && next != nil {
+				current = next
+				break
+			}
+			if loginErr == nil {
+				loginErr = fmt.Errorf("login returned no auth info")
+			}
+			log.Printf("issuer: AppRole re-authentication failed: %v", loginErr)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
+		}
+	}
 }
 
 // IssueCanary requests a short-lived canary certificate for cn from the
@@ -64,7 +126,7 @@ func (c *Client) IssueCanary(ctx context.Context, cn string) (*CanaryCert, error
 	certPEM, _ := secret.Data["certificate"].(string)
 	keyPEM, _ := secret.Data["private_key"].(string)
 	serial, _ := secret.Data["serial_number"].(string)
-	caChain, _ := secret.Data["issuing_ca"].(string)
+	issuerPEM, _ := secret.Data["issuing_ca"].(string)
 
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil {
@@ -74,14 +136,48 @@ func (c *Client) IssueCanary(ctx context.Context, cn string) (*CanaryCert, error
 	if err != nil {
 		return nil, fmt.Errorf("issuer: parsing canary certificate: %w", err)
 	}
+	issuerBlock, _ := pem.Decode([]byte(issuerPEM))
+	if issuerBlock == nil {
+		return nil, fmt.Errorf("issuer: could not decode issuing CA certificate PEM")
+	}
+	issuerCert, err := x509.ParseCertificate(issuerBlock.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("issuer: parsing issuing CA certificate: %w", err)
+	}
+
+	chain := pemStrings(secret.Data["ca_chain"])
+	if len(chain) == 0 {
+		chain = []string{issuerPEM}
+	}
 
 	return &CanaryCert{
 		CertPEM:      certPEM,
 		KeyPEM:       keyPEM,
-		ChainPEM:     certPEM + "\n" + caChain,
+		ChainPEM:     strings.Join(chain, "\n"),
+		IssuerPEM:    issuerPEM,
 		SerialNumber: serial,
 		Cert:         cert,
+		IssuerCert:   issuerCert,
 	}, nil
+}
+
+func pemStrings(value interface{}) []string {
+	var result []string
+	switch values := value.(type) {
+	case []interface{}:
+		for _, value := range values {
+			if pemValue, ok := value.(string); ok && pemValue != "" {
+				result = append(result, pemValue)
+			}
+		}
+	case []string:
+		for _, pemValue := range values {
+			if pemValue != "" {
+				result = append(result, pemValue)
+			}
+		}
+	}
+	return result
 }
 
 // Revoke revokes the certificate identified by serial.
@@ -120,6 +216,9 @@ func (c *Client) FetchCRL(ctx context.Context, crlURL string) (*x509.RevocationL
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("issuer: CRL endpoint returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 	crl, err := x509.ParseRevocationList(body)
 	if err != nil {
 		return nil, fmt.Errorf("issuer: parsing CRL: %w", err)
@@ -127,33 +226,36 @@ func (c *Client) FetchCRL(ctx context.Context, crlURL string) (*x509.RevocationL
 	return crl, nil
 }
 
-// QueryOCSP builds and sends a raw OCSP request for cert, signed by issuer,
-// against ocspURL, and returns the parsed OCSP response status.
-func (c *Client) QueryOCSP(ctx context.Context, ocspURL string, cert, issuerCert *x509.Certificate) (ocsp.ResponseStatus, error) {
+// FetchOCSPResponse builds and sends a raw OCSP request and returns both the
+// DER response (suitable for TLS stapling) and its certificate status.
+func (c *Client) FetchOCSPResponse(ctx context.Context, ocspURL string, cert, issuerCert *x509.Certificate) ([]byte, int, error) {
 	reqBytes, err := ocsp.CreateRequest(cert, issuerCert, nil)
 	if err != nil {
-		return 0, fmt.Errorf("issuer: creating OCSP request: %w", err)
+		return nil, 0, fmt.Errorf("issuer: creating OCSP request: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ocspURL, bytes.NewReader(reqBytes))
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/ocsp-request")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("issuer: OCSP request: %w", err)
+		return nil, 0, fmt.Errorf("issuer: OCSP request: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, 0, fmt.Errorf("issuer: OCSP responder returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	parsed, err := ocsp.ParseResponseForCert(body, cert, issuerCert)
 	if err != nil {
 		// A "revoked" OCSP response still parses; ocsp.ParseResponseForCert
 		// returns an error only for malformed responses, not for the
 		// revoked status itself (that's parsed.Status == ocsp.Revoked).
-		return 0, fmt.Errorf("issuer: parsing OCSP response: %w", err)
+		return nil, 0, fmt.Errorf("issuer: parsing OCSP response: %w", err)
 	}
-	return ocsp.ResponseStatus(parsed.Status), nil
+	return body, parsed.Status, nil
 }

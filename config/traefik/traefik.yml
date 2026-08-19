@@ -14,7 +14,6 @@ entryPoints:
 providers:
   docker:
     exposedByDefault: false
-    network: pki-sentinel
   file:
     directory: /etc/traefik/dynamic
     watch: true
@@ -22,14 +21,18 @@ providers:
 certificatesResolvers:
   internal:
     acme:
-      caServer: http://vault:8200/v1/pki_int/acme/directory
+      caServer: https://vault-acme.internal/v1/pki_int/acme/directory
       email: pki-sentinel@example.invalid
       storage: /acme/acme.json
+      keyType: EC256
       tlsChallenge: {}
 
 api:
   dashboard: true
   insecure: true
+
+# Enables the /ping endpoint used by the container healthcheck.
+ping: {}
 
 metrics:
   prometheus:

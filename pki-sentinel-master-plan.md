@@ -1,6 +1,6 @@
 # pki-sentinel — Master Implementation Plan (Phase 0 → Phase 6)
 
-**Audience:** an autonomous coding agent (Claude Code or equivalent) with shell, file-write, and Docker access.
+**Scope:** technical implementation plan for an environment with shell, file-write, and Docker access.
 **Runtime:** Docker Compose only. Kubernetes is explicitly out of scope for this plan.
 **Language of record:** all code, comments, commit messages, and documentation in English.
 
@@ -20,7 +20,7 @@
 
 The Assurance plane is the differentiator. If a trade-off ever forces a cut, cut Issuance polish, never Assurance.
 
-### 0.2 Non-negotiable rules for the agent
+### 0.2 Non-negotiable implementation rules
 
 1. **Idempotency.** Every script must be safe to run twice. Use `vault status || true`, `terraform apply -auto-approve` guarded by state, `mkdir -p`, `docker compose up -d` (never `docker compose run` for long-lived services).
 2. **Pin every version.** No `:latest` tags anywhere. No unpinned GitHub Action (`uses: actions/checkout@v4` is acceptable; `@main` is not).
@@ -34,14 +34,14 @@ The Assurance plane is the differentiator. If a trade-off ever forces a cut, cut
 ### 0.3 Pinned versions (single source of truth — put these in `.env.example`)
 
 ```
-VAULT_IMAGE=hashicorp/vault:1.15.6
+VAULT_IMAGE=hashicorp/vault:1.21.4
 # Apache-2.0 alternative, drop-in: openbao/openbao:2.0.0
-TRAEFIK_IMAGE=traefik:v3.1.2
+TRAEFIK_IMAGE=traefik:v3.7.9
 PROMETHEUS_IMAGE=prom/prometheus:v2.53.1
 GRAFANA_IMAGE=grafana/grafana:11.1.3
 ALERTMANAGER_IMAGE=prom/alertmanager:v0.27.0
 NODE_EXPORTER_IMAGE=prom/node-exporter:v1.8.2
-GO_VERSION=1.22
+GO_VERSION=1.26.5
 TERRAFORM_VERSION=1.9.5
 TERRAFORM_VAULT_PROVIDER=~> 4.3
 WAZUH_VERSION=4.8.2
@@ -53,7 +53,7 @@ WAZUH_VERSION=4.8.2
 - Internal DNS domain for issued certs: `*.internal`.
 - Service hostnames = compose service names: `vault`, `vault-seal`, `traefik`, `demo-api`, `revocation-probe`, `prometheus`, `grafana`, `alertmanager`.
 - Vault mounts: `pki_root`, `pki_int`, `kv` (kv-v2), `transit` (on `vault-seal` only).
-- All Go modules: `github.com/<OWNER>/pki-sentinel/services/<name>`. The agent must read `OWNER` from `.env` or default to `pki-sentinel`.
+- All Go modules: `github.com/ahpxna/pki-sentinel/services/<name>`.
 
 ### 0.5 Directory structure (create the full skeleton in Phase 0, populate later)
 
@@ -228,7 +228,7 @@ Do **not** add volumes yet — dev mode is in-memory by design and this is throw
 
 **Action:** Tab-indented recipes, `.PHONY` on every target, self-documenting `help` as the default goal.
 
-Required targets for Phase 0 (more are appended in later phases — the agent must **append**, never rewrite the Makefile):
+Required targets for Phase 0 (later phases append targets without replacing existing Makefile content):
 
 | Target | Behaviour |
 |---|---|
@@ -301,7 +301,7 @@ Compose changes for `vault`:
 - Remove all `VAULT_DEV_*` env vars.
 - `command: server -config=/vault/config/vault.hcl`
 - `environment: VAULT_TOKEN` is **not** set here; scripts export it.
-- `environment: VAULT_SEAL_TOKEN` passed via `.env` (the dev token of `vault-seal`) → mapped to `VAULT_SEAL_TOKEN` and referenced in `vault.hcl` via the `token` field OR supplied as `VAULT_TOKEN` env for the seal client. Simplest reliable approach: add `token = "${VAULT_SEAL_TOKEN}"` is **not** interpolated by Vault — instead set container env `VAULT_SEAL_TOKEN` and add `token` to the seal stanza by templating the file at boot with an entrypoint, **or** simply set env var `VAULT_TOKEN` for the transit seal client. Choose the documented mechanism: Vault reads the transit seal token from the `token` parameter or the `VAULT_TOKEN` env var. The agent must verify with `vault server -help` / the container logs and implement whichever works, then record the choice in `docs/adr/0002-auto-unseal-tradeoffs.md`.
+- `environment: VAULT_SEAL_TOKEN` passed via `.env` (the development token of `vault-seal`) and mapped to the authentication variable used by the transit seal client. Vault does not interpolate `token = "${VAULT_SEAL_TOKEN}"` in `vault.hcl`; supported options are a templated seal stanza or the `VAULT_TOKEN` environment variable. The selected mechanism must be verified with `vault server -help` and container logs, then recorded in `docs/adr/0002-auto-unseal-tradeoffs.md`.
 - Volumes: `./config/vault:/vault/config:ro`, `./.data/vault:/vault/data`
 - `depends_on: vault-seal: {condition: service_healthy}`
 - Healthcheck must tolerate the "sealed/uninitialized" states before bootstrap:
@@ -533,7 +533,7 @@ Write `docs/adr/0001-vault-vs-step-ca.md` and `docs/adr/0002-auto-unseal-tradeof
 2. `pki_int/config/cluster` with `path` and `aia_path` set (done in Step 1.6 — verify it is non-empty).
 3. `pki_int/config/acme` with `{"enabled": true, "allowed_roles": ["server"], "default_directory_policy": "role:server", "allowed_issuers": ["*"], "eab_policy": "not-required"}`.
 
-Also `sys/mounts/pki_int/tune` may need `-passthrough-request-headers` applied at the *sys* level; the agent must verify by curling the directory endpoint before proceeding.
+The `sys/mounts/pki_int/tune` endpoint may also require `passthrough_request_headers`; verify by requesting the directory endpoint before proceeding.
 
 **Verification:**
 ```bash
@@ -574,9 +574,9 @@ accessLog: { format: json, filePath: /var/log/traefik/access.log }
 log: { level: INFO, format: json }
 ```
 
-Two critical details the agent must not miss:
-- Because `caServer` is plain HTTP inside the Docker network, no CA trust bundle is needed for the ACME transport itself. If the agent later switches Vault to HTTPS, it **must** mount the root CA into the Traefik container and set `LEGO_CA_CERTIFICATES=/certs/root.pem`.
-- Vault ACME requires the `tls-alpn-01` or `http-01` challenge to resolve the hostname. Inside Compose, hostnames like `api.internal` must resolve — add `extra_hosts` or a network alias so `vault` can reach `api.internal` on port 443. Simplest reliable approach: add network aliases `api.internal` and `probe.internal` to the Traefik service and set `dns` accordingly. The agent must verify with `docker compose exec vault getent hosts api.internal`.
+Two required configuration details:
+- Because `caServer` uses plain HTTP inside the Docker network, no CA trust bundle is needed for the ACME transport. A future switch to HTTPS requires mounting the root CA into the Traefik container and setting `LEGO_CA_CERTIFICATES=/certs/root.pem`.
+- Vault ACME requires the `tls-alpn-01` or `http-01` challenge hostname to resolve. Inside Compose, hostnames such as `api.internal` need an `extra_hosts` entry or network alias so `vault` can reach port 443. Add the `api.internal` and `probe.internal` network aliases to Traefik and verify with `docker compose exec vault getent hosts api.internal`.
 
 **Verification:**
 ```bash
@@ -730,7 +730,7 @@ openssl s_client -connect 127.0.0.1:PORT -servername canary-x.canary.internal -s
 
 **Target file:** `internal/profiles/registry.go` + `profiles.yaml`
 
-**Action:** Implement at minimum these seven profiles. Each is a small wrapper around a subprocess or an in-process TLS dial. Expected baseline behaviour is stated so the agent knows when a result is a bug versus a finding.
+**Action:** Implement at minimum these seven profiles. Each is a small wrapper around a subprocess or an in-process TLS connection. Expected baseline behavior distinguishes implementation defects from measured findings.
 
 | Profile name | Implementation | Method | Expected baseline |
 |---|---|---|---|
@@ -941,7 +941,7 @@ docker compose logs webhook-logger | grep RevocationSoftFail
 `revocation-slo.json` panels:
 1. Stat: current soft-fail count in last 24h (thresholds: 0 green, ≥1 red).
 2. Bar gauge: detection p50/p95 per profile.
-3. Table: profile × method × last outcome — the "does your client actually check?" matrix.
+3. Table: profile × method × last outcome — the client revocation-enforcement matrix.
 4. Time series: OCSP responder latency.
 5. **Heatmap: soft-fail rate vs injected delay** — the chaos-sweep chart. This panel is the direct descendant of the CYB 260 soft-fail-rate figure and should be the visual centerpiece.
 
@@ -1154,13 +1154,13 @@ cosign verify ghcr.io/OWNER/pki-sentinel/revocation-probe:v0.1.0 \
 
 **Action:** Exact section order:
 
-1. **Title + one-liner**: "Internal PKI for SMEs that continuously proves your clients actually reject revoked certificates."
+1. **Title + one-liner**: "Internal PKI for SMEs with continuous evidence that clients reject revoked certificates."
 2. **Badges** row.
 3. **Demo GIF** (`docs/images/demo.gif`) — record with `charmbracelet/vhs`, script committed at `docs/images/demo.tape` so it is reproducible. Show: `make up` → `make demo-revoke` → the detection table with red soft-fail rows → the Grafana panel.
-4. **Why I built this** — three paragraphs. Paragraph 1: SMEs run internal services on self-signed or manually-renewed certs. Paragraph 2: those that do deploy revocation almost never verify that clients honor it. Paragraph 3: cite the prior measurement work — a controlled private-CA testbed showed the OCSP soft-fail transition is a narrow, jittery band rather than a clean threshold, with soft-fail rates reaching 100% at several delay points near the client timeout, and that a trusted-CA MITM succeeded in 100% of trials with no client-side indication. Link to `docs/benchmarks/`.
+4. **Rationale** — three paragraphs. Paragraph 1: SMEs run internal services on self-signed or manually renewed certificates. Paragraph 2: organizations that deploy revocation rarely verify client enforcement. Paragraph 3: cite the prior measurement work — a controlled private-CA testbed showed that the OCSP soft-fail transition is a narrow, variable band rather than a clean threshold, with soft-fail rates reaching 100% at several delay points near the client timeout, and that a trusted-CA MITM succeeded in 100% of trials with no client-side indication. Link to `docs/benchmarks/`.
 5. **Quick Start (3 commands)** — literally three lines, and they must work on a clean machine.
 6. **Architecture** — the diagram, plus the three-plane table.
-7. **What you get** — bullet list of concrete capabilities.
+7. **Included capabilities** — bullet list of concrete capabilities.
 8. **Try the demo** — `make demo-revoke`, `make chaos-sweep`, `make truststore-drift-demo`, each with expected output.
 9. **Client profile results table** — the honest matrix showing which clients check revocation and which do not. This is the single most compelling artifact in the repo.
 10. **Production notes** — see Step 6.4.

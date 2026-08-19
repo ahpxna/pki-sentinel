@@ -12,8 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ocsp"
+
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/metrics"
 )
 
 // writeTemp writes data to a temp file and returns its path. Callers are
@@ -64,14 +67,24 @@ func opensslOCSPDirect() Profile {
 		Description: "openssl ocsp -issuer chain.pem -cert leaf.pem -url <ocsp_url>",
 		Expected:    "rejected",
 		Probe: func(ctx context.Context, target Target) (Outcome, error) {
+			started := time.Now()
+			metrics.OCSPResponderUp.Set(0)
+			defer func() {
+				metrics.OCSPResponderLatency.Observe(time.Since(started).Seconds())
+			}()
+			issuerPath, cleanupIssuer, err := writeTemp("issuer-*.pem", []byte(target.IssuerPEM))
+			if err != nil {
+				return OutcomeError, err
+			}
+			defer cleanupIssuer()
 			chainPath, cleanupChain, err := writeTemp("chain-*.pem", []byte(target.CAChainPEM))
 			if err != nil {
 				return OutcomeError, err
 			}
 			defer cleanupChain()
 
-			// The leaf we're probing is whatever cert the canary server is
-			// presenting; fetch it via a plain TLS dial with no verification.
+			// The probe evaluates the certificate presented by the canary server;
+			// fetch it through a plain TLS connection without verification.
 			leafPEM, err := fetchLeafPEM(target)
 			if err != nil {
 				return OutcomeError, err
@@ -83,15 +96,18 @@ func opensslOCSPDirect() Profile {
 			defer cleanupLeaf()
 
 			stdout, stderr, err := runCmd(ctx, "openssl", "ocsp",
-				"-issuer", chainPath, "-cert", leafPath, "-url", target.OCSPURL, "-no_nonce")
+				"-issuer", issuerPath, "-cert", leafPath, "-url", target.OCSPURL,
+				"-CAfile", chainPath, "-no_nonce")
 			combined := stdout + stderr
 			if err != nil && !strings.Contains(combined, "revoked") {
 				return OutcomeError, fmt.Errorf("openssl ocsp: %w (%s)", err, combined)
 			}
 			if strings.Contains(combined, "revoked") {
+				metrics.OCSPResponderUp.Set(1)
 				return OutcomeRejected, nil
 			}
 			if strings.Contains(combined, "good") {
+				metrics.OCSPResponderUp.Set(1)
 				return OutcomeAccepted, nil
 			}
 			return OutcomeError, fmt.Errorf("openssl ocsp: unrecognized output: %s", combined)
@@ -119,10 +135,23 @@ func curlCertStatus() Profile {
 				"--cacert", chainPath, "--cert-status", "--resolve",
 				fmt.Sprintf("%s:%d:127.0.0.1", target.Host, target.Port), url)
 			if err != nil {
-				if strings.Contains(stderr, "certificate status") || strings.Contains(stderr, "revoked") {
+				if strings.Contains(stderr, "No OCSP response received") {
+					return OutcomeAccepted, nil
+				}
+				// libcurl's documented CURLE_SSL_INVALIDCERTSTATUS exit code is
+				// 91. Match the code rather than localized/version-specific text
+				// (new releases may say "revocation reason: UNKNOWN").
+				if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 91 {
 					return OutcomeRejected, nil
 				}
-				return OutcomeError, fmt.Errorf("curl --cert-status: %w (%s)", err, stderr)
+				// OpenSSL's status output includes the signer/verification detail
+				// that libcurl intentionally collapses into exit code 91. Preserve
+				// it in harness errors so an invalid staple is diagnosable.
+				debugOut, debugErr, _ := runCmd(ctx, "openssl", "s_client",
+					"-connect", fmt.Sprintf("127.0.0.1:%d", target.Port),
+					"-servername", target.Host, "-CAfile", chainPath,
+					"-status", "-verify_return_error")
+				return OutcomeError, fmt.Errorf("curl --cert-status: %w (%s); openssl status: %s%s", err, stderr, debugOut, debugErr)
 			}
 			return OutcomeAccepted, nil
 		},
@@ -168,7 +197,11 @@ func goTLSDefault() Profile {
 			pool := x509.NewCertPool()
 			pool.AppendCertsFromPEM([]byte(target.CAChainPEM))
 			addr := fmt.Sprintf("127.0.0.1:%d", target.Port)
-			d := &tls.Dialer{Config: &tls.Config{RootCAs: pool, ServerName: target.Host}}
+			d := &tls.Dialer{Config: &tls.Config{
+				RootCAs:    pool,
+				ServerName: target.Host,
+				MinVersion: tls.VersionTLS12,
+			}}
 			conn, err := d.DialContext(ctx, "tcp", addr)
 			if err != nil {
 				return OutcomeError, fmt.Errorf("go-tls-default: dial: %w", err)
@@ -191,7 +224,11 @@ func goTLSOCSP() Profile {
 			pool := x509.NewCertPool()
 			pool.AppendCertsFromPEM([]byte(target.CAChainPEM))
 			addr := fmt.Sprintf("127.0.0.1:%d", target.Port)
-			d := &tls.Dialer{Config: &tls.Config{RootCAs: pool, ServerName: target.Host}}
+			d := &tls.Dialer{Config: &tls.Config{
+				RootCAs:    pool,
+				ServerName: target.Host,
+				MinVersion: tls.VersionTLS12,
+			}}
 			conn, err := d.DialContext(ctx, "tcp", addr)
 			if err != nil {
 				return OutcomeError, fmt.Errorf("go-tls-ocsp: dial: %w", err)
@@ -210,7 +247,24 @@ func goTLSOCSP() Profile {
 				// than a harness error.
 				return OutcomeAccepted, nil
 			}
-			resp, err := ocsp.ParseResponse(staple, nil)
+			leafPEM, err := fetchLeafPEM(target)
+			if err != nil {
+				return OutcomeError, err
+			}
+			leafBlock, _ := pem.Decode(leafPEM)
+			issuerBlock, _ := pem.Decode([]byte(target.IssuerPEM))
+			if leafBlock == nil || issuerBlock == nil {
+				return OutcomeError, fmt.Errorf("go-tls-ocsp: invalid leaf or issuer PEM")
+			}
+			leaf, err := x509.ParseCertificate(leafBlock.Bytes)
+			if err != nil {
+				return OutcomeError, fmt.Errorf("go-tls-ocsp: parsing leaf: %w", err)
+			}
+			issuerCert, err := x509.ParseCertificate(issuerBlock.Bytes)
+			if err != nil {
+				return OutcomeError, fmt.Errorf("go-tls-ocsp: parsing issuer: %w", err)
+			}
+			resp, err := ocsp.ParseResponseForCert(staple, leaf, issuerCert)
 			if err != nil {
 				return OutcomeError, fmt.Errorf("go-tls-ocsp: parsing staple: %w", err)
 			}
@@ -239,9 +293,14 @@ func pythonRequests() Profile {
 
 			script := fmt.Sprintf(`
 import requests
-r = requests.get("https://%s:%d/", verify=%q, timeout=5)
+import socket
+real_getaddrinfo = socket.getaddrinfo
+socket.getaddrinfo = lambda host, port, *args, **kwargs: real_getaddrinfo("127.0.0.1" if host == %q else host, port, *args, **kwargs)
+s = requests.Session()
+s.trust_env = False
+r = s.get("https://%s:%d/", verify=%q, timeout=5)
 print(r.status_code)
-`, target.Host, target.Port, chainPath)
+`, target.Host, target.Host, target.Port, chainPath)
 			stdout, stderr, err := runCmd(ctx, "python3", "-c", script)
 			if err != nil {
 				return OutcomeError, fmt.Errorf("python-requests: %w (%s)", err, stderr)
@@ -260,8 +319,8 @@ func crlCheck() Profile {
 	return Profile{
 		Name:        "crl-check",
 		Method:      MethodCRL,
-		Description: "download CRL, parse with x509.ParseRevocationList, check serial",
-		Expected:    "rejected after CRL rebuild interval",
+		Description: "download delta CRL, parse with x509.ParseRevocationList, check serial",
+		Expected:    "rejected after delta CRL rebuild interval",
 		Probe: func(ctx context.Context, target Target) (Outcome, error) {
 			leafPEM, err := fetchLeafPEM(target)
 			if err != nil {
@@ -284,6 +343,8 @@ func crlCheck() Profile {
 			if err != nil {
 				return OutcomeError, fmt.Errorf("crl-check: parsing CRL: %w", err)
 			}
+			metrics.CRLAgeSeconds.Set(time.Since(crl.ThisUpdate).Seconds())
+			metrics.CRLEntries.Set(float64(len(crl.RevokedCertificateEntries)))
 			for _, entry := range crl.RevokedCertificateEntries {
 				if entry.SerialNumber.Cmp(leaf.SerialNumber) == 0 {
 					return OutcomeRejected, nil
@@ -298,7 +359,15 @@ func crlCheck() Profile {
 
 func fetchLeafPEM(target Target) ([]byte, error) {
 	addr := fmt.Sprintf("127.0.0.1:%d", target.Port)
-	conn, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true, ServerName: target.Host})
+	// The leaf-fetch path intentionally bypasses verification: the returned
+	// certificate is immediately used as the subject of an independent OCSP
+	// or CRL check, never as proof that the peer is trusted.
+	// #nosec G402 -- intentional discovery connection explained above.
+	conn, err := tls.Dial("tcp", addr, &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         target.Host,
+		MinVersion:         tls.VersionTLS12,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("fetchLeafPEM: dial: %w", err)
 	}
@@ -320,5 +389,8 @@ func httpGet(ctx context.Context, url string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
+	}
 	return io.ReadAll(resp.Body)
 }

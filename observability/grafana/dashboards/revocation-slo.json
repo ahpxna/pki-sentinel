@@ -55,7 +55,7 @@
     {
       "id": 3,
       "type": "table",
-      "title": "Profile x Method x Last Outcome — does your client actually check?",
+      "title": "Profile x Method x Last Outcome — client revocation enforcement",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [

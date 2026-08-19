@@ -2,6 +2,7 @@ name: ${COMPOSE_PROJECT_NAME:-pki-sentinel}
 
 networks:
   pki-sentinel:
+    name: ${COMPOSE_PROJECT_NAME:-pki-sentinel}
     driver: bridge
 
 services:
@@ -25,11 +26,34 @@ services:
       retries: 12
       start_period: 5s
 
+  # One-shot dependency gate: the primary Vault cannot even parse its transit
+  # seal stanza until this mount and key exist. Keeping this in Compose makes
+  # `docker compose up` work from a completely empty .data directory.
+  vault-seal-init:
+    image: ${VAULT_IMAGE}
+    container_name: pki-vault-seal-init
+    networks: [pki-sentinel]
+    environment:
+      VAULT_ADDR: http://vault-seal:8200
+      VAULT_TOKEN: ${VAULT_SEAL_TOKEN}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        vault secrets enable transit >/dev/null 2>&1 || true
+        vault write -f transit/keys/autounseal >/dev/null
+    depends_on:
+      vault-seal:
+        condition: service_healthy
+    restart: "no"
+
   vault:
     image: ${VAULT_IMAGE}
     container_name: pki-vault
     cap_add: ["IPC_LOCK"]
-    command: server -config=/vault/config/vault.hcl
+    # The official entrypoint already injects -config=/vault/config. Passing
+    # the file again loads the transit seal twice and Vault aborts with
+    # "more than one enabled seal found".
+    command: server
     environment:
       VAULT_ADDR: http://127.0.0.1:8200
       # Transit auto-unseal client token for vault-seal. Vault's transit seal
@@ -46,6 +70,8 @@ services:
     depends_on:
       vault-seal:
         condition: service_healthy
+      vault-seal-init:
+        condition: service_completed_successfully
     healthcheck:
       # Must tolerate "sealed"/"uninitialized" states before bootstrap runs.
       test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:8200/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204' || exit 1"]
@@ -66,6 +92,7 @@ services:
         aliases:
           - api.internal
           - probe.internal
+          - vault-acme.internal
     ports:
       - "${TRAEFIK_HTTP_PORT}:80"
       - "${TRAEFIK_HTTPS_PORT}:443"
@@ -75,7 +102,11 @@ services:
       - ./config/traefik/dynamic:/etc/traefik/dynamic:ro
       - ./.data/traefik/acme:/acme
       - ./.data/traefik/logs:/var/log/traefik
+      - ./.data/traefik/bootstrap:/etc/traefik/bootstrap:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      TRAEFIK_PROVIDERS_DOCKER_NETWORK: ${COMPOSE_PROJECT_NAME:-pki-sentinel}
+      LEGO_CA_CERTIFICATES: /etc/traefik/bootstrap/vault-acme.crt
     depends_on:
       vault:
         condition: service_healthy
@@ -91,6 +122,7 @@ services:
     build:
       context: ./services/demo-api
     container_name: pki-demo-api
+    profiles: ["app"]
     networks: [pki-sentinel]
     environment:
       VAULT_ADDR: http://vault:8200
@@ -113,14 +145,18 @@ services:
     build:
       context: ./services/revocation-probe
     container_name: pki-revocation-probe
+    profiles: ["app"]
     networks: [pki-sentinel]
     cap_add: ["NET_ADMIN"] # required for --chaos tc netem sweeps (Step 3.7)
     environment:
       VAULT_ADDR: http://vault:8200
-      VAULT_PUBLIC_ADDR: http://localhost:${VAULT_PORT}
+      # The probe runs inside Compose, so localhost would point back to the
+      # probe container rather than Vault.
+      VAULT_PUBLIC_ADDR: http://vault:8200
       PKI_DOMAIN: ${PKI_DOMAIN}
     env_file:
-      - ./.data/approle/revocation-probe.env
+      - path: ./.data/approle/revocation-probe.env
+        required: false
     ports: ["${PROBE_METRICS_PORT}:9110"]
     volumes:
       - ./docs/benchmarks/data:/etc/pki-sentinel/docs/benchmarks/data

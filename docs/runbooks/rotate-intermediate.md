@@ -6,8 +6,8 @@ or emergency rotation after a suspected intermediate key compromise.
 **Impact:** every leaf certificate issued by the current intermediate must
 eventually be re-issued under the new one. Because leaf TTLs are short
 (24h — see [ADR-0003](../adr/0003-short-lived-certs-over-revocation.md)),
-routine rotation is low-drama: stop issuing from the old intermediate and
-let the 24h TTL naturally cycle every leaf onto the new one.
+routine rotation can stop issuance from the old intermediate and allow the
+24-hour TTL to replace each leaf certificate through normal renewal.
 
 ## Immediate actions (emergency: suspected intermediate key compromise)
 

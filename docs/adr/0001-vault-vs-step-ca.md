@@ -6,13 +6,13 @@
 
 pki-sentinel needs a PKI engine that issues short-lived leaf certificates, runs
 an ACME endpoint, exposes CRL/OCSP, and integrates with secret management for
-the AppRole identity story used by `demo-api` and `revocation-probe`.
+the AppRole identity model used by `demo-api` and `revocation-probe`.
 Candidates considered: HashiCorp Vault / OpenBao PKI secrets engine, Smallstep
 `step-ca`, and Let's Encrypt's Boulder.
 
 ## Decision Drivers
 
-- Licensing (BUSL vs Apache-2.0) and how that affects a reference/demo repo
+- Licensing (BUSL vs Apache-2.0) and its effect on a reference repository
   meant to be freely cloned and run.
 - Synergy with secret management (KV, AppRole, transit) so one platform
   serves both PKI and application secrets.
@@ -37,11 +37,10 @@ Candidates considered: HashiCorp Vault / OpenBao PKI secrets engine, Smallstep
 ## Decision Outcome
 
 Use HashiCorp Vault (BUSL-licensed as of 1.15) as the reference implementation,
-with OpenBao documented as an Apache-2.0 drop-in alternative for anyone who
-needs a fully open-source license. Vault wins because it collapses PKI +
-secret management + auth into one platform, which is exactly what the
-Issuance and identity story in this repo needs, and its ACME support means
-Traefik can obtain certificates with zero manual steps.
+with OpenBao documented as an Apache-2.0 drop-in alternative when an
+open-source license is required. Vault combines PKI, secret management, and
+authentication in one platform. Its ACME support also allows Traefik to
+obtain certificates without manual issuance steps.
 
 ## Consequences
 

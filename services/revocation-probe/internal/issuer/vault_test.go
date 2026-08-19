@@ -51,3 +51,18 @@ func TestIssueRevoke(t *testing.T) {
 		t.Fatal("expected t_response >= t_request")
 	}
 }
+
+func TestPEMStrings(t *testing.T) {
+	want := []string{"issuer", "root"}
+	for name, input := range map[string]interface{}{
+		"interface slice": []interface{}{"issuer", "", "root", 42},
+		"string slice":    []string{"issuer", "", "root"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := pemStrings(input)
+			if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+				t.Fatalf("pemStrings(%T) = %v, want %v", input, got, want)
+			}
+		})
+	}
+}

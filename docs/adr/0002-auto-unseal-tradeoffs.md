@@ -12,19 +12,19 @@ that must run unattended in CI and on a developer's laptop alike.
 ## Decision Drivers
 
 - The bootstrap script must be fully automatic — no human typing unseal keys.
-- The repo should still demonstrate the *shape* of a production auto-unseal
-  setup (transit seal), not just disable sealing entirely.
-- Honesty: this demo pattern is explicitly not the production answer.
+- The reference deployment should demonstrate a transit-seal auto-unseal
+  architecture instead of disabling sealing.
+- The development-only seal service must be identified as unsuitable for
+  production use.
 
 ## Considered Options
 
 1. **Shamir unseal keys, manually supplied.** Rejected: blocks automated
    bootstrap and CI.
 2. **Transit auto-unseal against a second, dev-mode Vault (`vault-seal`).**
-   Chosen for this repo.
-3. **Cloud KMS auto-unseal (AWS/GCP/Azure) or HSM.** The actual production
-   answer, but requires cloud credentials this demo cannot assume the
-   reader has.
+   Chosen for this repository.
+3. **Cloud KMS auto-unseal (AWS/GCP/Azure) or HSM.** Suitable for production,
+   but dependent on cloud credentials unavailable to a self-contained demo.
 
 ## Decision Outcome
 
@@ -34,11 +34,11 @@ container's `seal "transit"` stanza points at it. This gives real transit
 auto-unseal mechanics (recovery keys instead of unseal keys, automatic
 unseal on restart) without requiring cloud credentials.
 
-**This is explicitly a demo stand-in, not a production pattern.** `vault-seal`
-runs in-memory dev mode: anyone with access to its container has the
+**This is a development substitute, not a production pattern.** `vault-seal`
+runs in-memory development mode: an actor with container access has the
 autounseal key, and its own audit trail does not exist. In production this
-container is replaced by a cloud KMS or a hardware security module — the
-`seal` stanza's shape barely changes, only the address and credentials do.
+container is replaced by a cloud KMS or a hardware security module. The
+`seal` stanza retains the same purpose with provider-specific configuration.
 
 The transit seal client authenticates via the `VAULT_TOKEN` environment
 variable set on the `vault` container (verified against `vault server -help`

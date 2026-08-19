@@ -84,6 +84,8 @@ func Sweep(ctx context.Context, iface string, delaysMS []int, trials int, runTri
 func setDelay(iface string, delayMS int) error {
 	// Idempotent: `replace` works whether or not a netem qdisc already
 	// exists on this interface.
+	// #nosec G204 -- exec.Command does not invoke a shell; iface is passed as
+	// one argument and tc validates interface names itself.
 	cmd := exec.Command("tc", "qdisc", "replace", "dev", iface, "root", "netem",
 		"delay", strconv.Itoa(delayMS)+"ms")
 	out, err := cmd.CombinedOutput()

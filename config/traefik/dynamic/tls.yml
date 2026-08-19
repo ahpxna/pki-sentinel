@@ -1,8 +1,18 @@
-# Placeholder for static TLS options / middlewares added in later phases.
-# Kept as a separate file so Traefik's file provider has something to watch
-# from Phase 2 onward without requiring a restart when new dynamic config
-# (middlewares, extra routers) is added.
+# Dynamic security middleware. Keeping this in the watched file-provider
+# directory allows future TLS options, routers, and middleware changes to be
+# applied without restarting Traefik.
 http:
+  routers:
+    vault-acme:
+      rule: Host(`vault-acme.internal`)
+      entryPoints: [websecure]
+      service: vault-acme
+      tls: {}
+  services:
+    vault-acme:
+      loadBalancer:
+        servers:
+          - url: http://vault:8200
   middlewares:
     secure-headers:
       headers:
@@ -10,3 +20,8 @@ http:
         stsIncludeSubdomains: true
         contentTypeNosniff: true
         frameDeny: true
+
+tls:
+  certificates:
+    - certFile: /etc/traefik/bootstrap/vault-acme.crt
+      keyFile: /etc/traefik/bootstrap/vault-acme.key

@@ -8,8 +8,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
-	"os"
-	"strings"
 	"sync"
 	"time"
 )
@@ -29,22 +27,18 @@ const (
 	StaplingStale StaplingMode = "stale"
 )
 
-// hostsMu serializes /etc/hosts edits across cycles: only one cycle may
-// hold an entry at a time, since all probe subprocesses share one
-// /etc/hosts inside a single container.
-var hostsMu sync.Mutex
-
 // Server is a single-cycle ephemeral TLS canary endpoint.
 type Server struct {
 	Hostname string // e.g. canary-<uuid>.canary.internal
 	Port     int
 
-	ln       net.Listener
-	srv      *tlsServer
-	hostsAdded bool
+	ln  net.Listener
+	srv *tlsServer
 }
 
 type tlsServer struct {
+	mu     sync.RWMutex
+	cert   *tls.Certificate
 	config *tls.Config
 }
 
@@ -66,24 +60,22 @@ func Start(hostname string, certPEM, keyPEM []byte, staple []byte) (*Server, err
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	hostsMu.Lock()
-	if err := addHostsEntry(hostname); err != nil {
-		hostsMu.Unlock()
-		_ = ln.Close()
-		return nil, fmt.Errorf("canary: adding /etc/hosts entry: %w", err)
+	tlsSrv := &tlsServer{cert: &cert}
+	tlsSrv.config = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			tlsSrv.mu.RLock()
+			defer tlsSrv.mu.RUnlock()
+			return tlsSrv.cert, nil
+		},
 	}
 
 	s := &Server{
-		Hostname:   hostname,
-		Port:       port,
-		ln:         ln,
-		hostsAdded: true,
-		srv: &tlsServer{config: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		}},
+		Hostname: hostname,
+		Port:     port,
+		ln:       ln,
+		srv:      tlsSrv,
 	}
-	hostsMu.Unlock()
 
 	go s.serve()
 	return s, nil
@@ -105,42 +97,18 @@ func (s *Server) serve() {
 	}
 }
 
-// Close stops the listener and removes the temporary /etc/hosts entry.
+// SetOCSPStaple atomically replaces the staple used by future TLS handshakes.
+func (s *Server) SetOCSPStaple(staple []byte) {
+	s.srv.mu.Lock()
+	defer s.srv.mu.Unlock()
+	cert := *s.srv.cert
+	cert.OCSPStaple = append([]byte(nil), staple...)
+	s.srv.cert = &cert
+}
+
+// Close stops the listener.
 func (s *Server) Close() error {
-	err := s.ln.Close()
-	if s.hostsAdded {
-		hostsMu.Lock()
-		_ = removeHostsEntry(s.Hostname)
-		hostsMu.Unlock()
-	}
-	return err
-}
-
-func addHostsEntry(hostname string) error {
-	f, err := os.OpenFile("/etc/hosts", os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.WriteString(fmt.Sprintf("127.0.0.1 %s\n", hostname))
-	return err
-}
-
-func removeHostsEntry(hostname string) error {
-	data, err := os.ReadFile("/etc/hosts")
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(string(data), "\n")
-	kept := lines[:0]
-	needle := "127.0.0.1 " + hostname
-	for _, line := range lines {
-		if strings.TrimSpace(line) == needle {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	return os.WriteFile("/etc/hosts", []byte(strings.Join(kept, "\n")), 0o644)
+	return s.ln.Close()
 }
 
 // WaitReachable polls the canary endpoint until it accepts a raw TCP

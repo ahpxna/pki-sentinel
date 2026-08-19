@@ -35,6 +35,7 @@ type Target struct {
 	Host       string // SNI hostname, e.g. canary-<uuid>.canary.internal
 	Port       int
 	CAChainPEM string // PEM bundle: issuing CA + root CA
+	IssuerPEM  string // issuing CA used to validate OCSP responses
 	OCSPURL    string
 	CRLURL     string
 }

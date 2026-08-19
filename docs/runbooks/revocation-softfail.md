@@ -4,8 +4,8 @@
 
 **Impact:** a client profile with `method != "none"` accepted a certificate
 that Vault had already revoked. This means a client that is *supposed* to
-check revocation status failed to detect it — this is a real enforcement
-gap, not the expected "structurally blind" behavior of `method="none"`
+check revocation status failed to detect it. This is an enforcement gap,
+not the expected "structurally blind" behavior of `method="none"`
 profiles (see [ADR-0007](../adr/0007-alerting-on-method-not-none-only.md)).
 
 ## Immediate actions
@@ -16,16 +16,15 @@ profiles (see [ADR-0007](../adr/0007-alerting-on-method-not-none-only.md)).
    curl -s "http://localhost:${ALERTMANAGER_PORT:-9093}/api/v2/alerts" | jq '.[] | select(.labels.alertname=="RevocationSoftFailDetected")'
    ```
 
-2. Confirm the OCSP responder and CRL are healthy (a soft-fail can be a
-   symptom of a stale/unreachable responder, not just a client defect):
+2. Confirm the OCSP responder and CRL are healthy. A soft-fail can indicate a
+   stale or unreachable responder rather than a client implementation defect:
 
    ```bash
    curl -s "http://localhost:${VAULT_PORT:-8200}/v1/pki_int/ocsp" -o /dev/null -w '%{http_code}\n'
    curl -s "http://localhost:${PROMETHEUS_PORT:-9090}/api/v1/query?query=pki_crl_age_seconds" | jq '.data.result'
    ```
 
-3. Re-run a manual cycle to confirm the finding is reproducible, not a
-   one-off flake:
+3. Run a manual cycle to determine whether the finding is reproducible:
 
    ```bash
    make demo-revoke
@@ -38,7 +37,7 @@ profiles (see [ADR-0007](../adr/0007-alerting-on-method-not-none-only.md)).
 ## Verification
 
 ```bash
-# after remediation, confirm the same cycle now shows "rejected" for the affected profile
+# Confirm that the affected profile reports "rejected" after remediation.
 make demo-revoke
 curl -s "http://localhost:${PROBE_METRICS_PORT:-9110}/metrics" | grep pki_revocation_detected_total
 ```

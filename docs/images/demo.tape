@@ -11,7 +11,7 @@ Type "cp .env.example .env"
 Enter
 Sleep 500ms
 
-Type "make up"
+Type "make bootstrap"
 Enter
 Sleep 5s
 

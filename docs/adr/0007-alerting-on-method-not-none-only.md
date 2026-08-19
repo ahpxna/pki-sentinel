@@ -8,16 +8,16 @@
 is the highest-severity alert in the system: a client accepted a revoked
 certificate. But several baseline profiles (`curl-default`, `go-tls-default`,
 `python-requests`) are *expected* to accept every single cycle, because they
-perform no revocation check by default — that is documented, known,
-unsurprising behavior, not a defect discovered at 3am.
+perform no revocation check by default. This is documented baseline behavior,
+not an unexpected enforcement failure.
 
 ## Decision Drivers
 
 - Paging on an expected, structural property of a client produces alert
   fatigue and trains responders to ignore the alert.
 - The distinction between "this client is blind to revocation by design"
-  and "this client checks and still got it wrong" is safety-critical and
-  must be visible somewhere, just not in PagerDuty.
+  and "this client attempted enforcement but accepted the certificate" is
+  operationally significant and must remain visible outside paging alerts.
 
 ## Considered Options
 
@@ -35,8 +35,8 @@ increase(pki_revocation_softfail_total{method!="none"}[30m]) > 0
 ```
 The `method="none"` cohort is still fully recorded in
 `pki_revocation_softfail_total` and shown in the "Profile × Method × Last
-Outcome" table on the `revocation-slo` dashboard — it's a reporting
-concern, not a paging concern.
+Outcome" table on the `revocation-slo` dashboard. This cohort is a reporting
+concern rather than a paging condition.
 
 ## Consequences
 

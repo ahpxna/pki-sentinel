@@ -1,6 +1,7 @@
 pki_domain        = "internal"
 org_name          = "PKI Sentinel Demo"
 vault_public_addr = "http://localhost:8200"
+vault_acme_addr   = "https://vault-acme.internal"
 root_ttl_hours    = 87600
 int_ttl_hours     = 8760
 leaf_max_ttl_hours = 24

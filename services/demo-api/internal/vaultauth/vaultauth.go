@@ -82,39 +82,58 @@ func Login(ctx context.Context, vaultAddr string, creds EnvCreds) (*Client, erro
 	}
 
 	c := &Client{API: api}
-	go c.renewLoop(ctx, authInfo)
+	go c.renewLoop(ctx, auth, authInfo)
 	return c, nil
 }
 
-// renewLoop keeps the current token renewed until ctx is cancelled or the
-// token can no longer be renewed, in which case it re-authenticates.
-func (c *Client) renewLoop(ctx context.Context, initial *vaultapi.Secret) {
-	watcher, err := c.API.NewLifetimeWatcher(&vaultapi.LifetimeWatcherInput{
-		Secret: initial,
-	})
-	if err != nil {
-		log.Printf("vaultauth: failed to start lifetime watcher: %v", err)
-		return
-	}
-	go watcher.Start()
-	defer watcher.Stop()
-
+// renewLoop renews the current token and performs a fresh AppRole login when
+// the token reaches token_max_ttl.
+func (c *Client) renewLoop(ctx context.Context, auth vaultapi.AuthMethod, initial *vaultapi.Secret) {
+	current := initial
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case err := <-watcher.DoneCh():
-			if err != nil {
-				log.Printf("vaultauth: token renewal stopped: %v", err)
-			} else {
-				log.Printf("vaultauth: token renewal channel closed")
+		watcher, err := c.API.NewLifetimeWatcher(&vaultapi.LifetimeWatcherInput{Secret: current})
+		if err == nil {
+			go watcher.Start()
+			watching := true
+			for watching {
+				select {
+				case <-ctx.Done():
+					watcher.Stop()
+					return
+				case watchErr := <-watcher.DoneCh():
+					if watchErr != nil {
+						log.Printf("vaultauth: token renewal stopped: %v; re-authenticating", watchErr)
+					}
+					watcher.Stop()
+					watching = false
+				case renewal := <-watcher.RenewCh():
+					if renewal != nil && renewal.Secret != nil {
+						log.Printf("vaultauth: token renewed, new lease duration: %ds", renewal.Secret.LeaseDuration)
+					}
+				}
 			}
-			return
-		case renewal := <-watcher.RenewCh():
-			log.Printf("vaultauth: token renewed, new lease duration: %ds", renewal.Secret.LeaseDuration)
-		case <-time.After(time.Hour):
-			// Safety net: avoid a goroutine leak if the watcher channels
-			// never fire for any reason.
+		} else {
+			log.Printf("vaultauth: failed to create lifetime watcher: %v; re-authenticating", err)
+		}
+
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			next, loginErr := c.API.Auth().Login(ctx, auth)
+			if loginErr == nil && next != nil {
+				current = next
+				break
+			}
+			if loginErr == nil {
+				loginErr = fmt.Errorf("login returned no auth info")
+			}
+			log.Printf("vaultauth: AppRole re-authentication failed: %v", loginErr)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
 		}
 	}
 }

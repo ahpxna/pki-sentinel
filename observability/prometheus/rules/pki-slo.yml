@@ -8,7 +8,7 @@ groups:
           severity: critical
         annotations:
           summary: "Client profile {{ $labels.profile }} accepted a REVOKED certificate"
-          runbook_url: "https://github.com/OWNER/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"
+          runbook_url: "https://github.com/ahpxna/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"
 
       - alert: RevocationDetectionSLOBreach
         expr: histogram_quantile(0.95, sum by (le, profile) (rate(pki_revocation_detection_seconds_bucket[1h]))) > 30
@@ -17,7 +17,7 @@ groups:
           severity: warning
         annotations:
           summary: "p95 revocation detection time for {{ $labels.profile }} exceeds 30s"
-          runbook_url: "https://github.com/OWNER/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"
+          runbook_url: "https://github.com/ahpxna/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"
 
       - alert: OCSPResponderDown
         expr: pki_ocsp_responder_up == 0
@@ -26,7 +26,7 @@ groups:
           severity: critical
         annotations:
           summary: "OCSP responder appears down"
-          runbook_url: "https://github.com/OWNER/pki-sentinel/blob/main/docs/runbooks/ocsp-responder-down.md"
+          runbook_url: "https://github.com/ahpxna/pki-sentinel/blob/main/docs/runbooks/ocsp-responder-down.md"
 
       - alert: CRLStale
         expr: pki_crl_age_seconds > 86400
@@ -35,7 +35,7 @@ groups:
           severity: warning
         annotations:
           summary: "CRL has not been rebuilt in over 24h"
-          runbook_url: "https://github.com/OWNER/pki-sentinel/blob/main/docs/runbooks/ocsp-responder-down.md"
+          runbook_url: "https://github.com/ahpxna/pki-sentinel/blob/main/docs/runbooks/ocsp-responder-down.md"
 
       - alert: CertificateExpiringSoon
         expr: (pki_cert_not_after_timestamp_seconds - time()) < 7*24*3600
@@ -52,4 +52,4 @@ groups:
           severity: warning
         annotations:
           summary: "revocation-probe has had more than 2 failed cycles in the last hour"
-          runbook_url: "https://github.com/OWNER/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"
+          runbook_url: "https://github.com/ahpxna/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"

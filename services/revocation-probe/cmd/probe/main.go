@@ -17,13 +17,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pki-sentinel/pki-sentinel/services/revocation-probe/internal/canary"
-	"github.com/pki-sentinel/pki-sentinel/services/revocation-probe/internal/chaos"
-	"github.com/pki-sentinel/pki-sentinel/services/revocation-probe/internal/config"
-	"github.com/pki-sentinel/pki-sentinel/services/revocation-probe/internal/issuer"
-	"github.com/pki-sentinel/pki-sentinel/services/revocation-probe/internal/metrics"
-	"github.com/pki-sentinel/pki-sentinel/services/revocation-probe/internal/profiles"
-	"github.com/pki-sentinel/pki-sentinel/services/revocation-probe/internal/runner"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/canary"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/chaos"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/config"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/issuer"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/metrics"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/runner"
 )
 
 func main() {
@@ -107,33 +107,41 @@ func cmdRun(args []string) {
 		Profiles: profiles.Registry(),
 		Stapling: canary.StaplingMode(*stapling),
 		OCSPURL:  vaultPublicAddr + "/v1/pki_int/ocsp",
-		CRLURL:   vaultPublicAddr + "/v1/pki_int/crl",
-		Domain:   domain,
+		// The demo enables Vault delta CRLs with a one-minute rebuild
+		// interval; the full CRL is intentionally long-lived (72h).
+		CRLURL: vaultPublicAddr + "/v1/pki_int/crl/delta",
+		Domain: domain,
 	}
 
-	runCycle := func() {
+	runCycle := func() error {
 		report, err := r.RunOnce(ctx)
 		if err != nil {
-			log.Printf("probe run: cycle error: %v", err)
-			return
+			return err
 		}
 		printReport(report, *output)
+		return nil
 	}
 
 	if *once {
-		runCycle()
+		if err := runCycle(); err != nil {
+			log.Fatalf("probe run: cycle error: %v", err)
+		}
 		return
 	}
 
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
-	runCycle()
+	if err := runCycle(); err != nil {
+		log.Printf("probe run: cycle error: %v", err)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			runCycle()
+			if err := runCycle(); err != nil {
+				log.Printf("probe run: cycle error: %v", err)
+			}
 		}
 	}
 }
@@ -195,7 +203,7 @@ func cmdCheck(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	t := profiles.Target{Host: host, Port: port, CAChainPEM: string(caPEM)}
+	t := profiles.Target{Host: host, Port: port, CAChainPEM: string(caPEM), IssuerPEM: string(caPEM)}
 	outcome, err := found.Probe(ctx, t)
 	if err != nil {
 		fmt.Printf("outcome=error err=%v\n", err)
@@ -250,6 +258,7 @@ func cmdChaos(args []string) {
 	}
 
 	vaultAddr := env("VAULT_ADDR", "http://vault:8200")
+	vaultPublicAddr := env("VAULT_PUBLIC_ADDR", "http://localhost:8200")
 	roleID := env("VAULT_ROLE_ID", "")
 	secretID := env("VAULT_SECRET_ID", "")
 	domain := env("PKI_DOMAIN", "internal")
@@ -273,6 +282,8 @@ func cmdChaos(args []string) {
 		Config:   cfg,
 		Profiles: profiles.Registry(),
 		Stapling: canary.StaplingOff,
+		OCSPURL:  vaultPublicAddr + "/v1/pki_int/ocsp",
+		CRLURL:   vaultPublicAddr + "/v1/pki_int/crl/delta",
 		Domain:   domain,
 	}
 

@@ -3,19 +3,19 @@
 **Trigger:** `OCSPResponderDown` or `CRLStale` (see `observability/prometheus/rules/pki-slo.yml`)
 
 **Impact:** clients that do check revocation can no longer get a fresh
-answer. Per `docs/benchmarks/ocsp-softfail-thresholds.md`, a degraded (not
-just down) responder is enough to push soft-fail rates toward 100% — an
+answer. Per `docs/benchmarks/ocsp-softfail-thresholds.md`, a degraded rather
+than fully unavailable responder can push soft-fail rates toward 100%; an
 attacker does not need to fully block the path.
 
 ## Immediate actions
 
-1. Confirm the responder is actually unreachable, not just slow:
+1. Distinguish responder unavailability from high response latency:
 
    ```bash
    curl -s -o /dev/null -w '%{http_code} %{time_total}s\n' "http://localhost:${VAULT_PORT:-8200}/v1/pki_int/ocsp"
    ```
 
-2. Check Vault's own health and logs:
+2. Check Vault health and logs:
 
    ```bash
    curl -s "http://localhost:${VAULT_PORT:-8200}/v1/sys/health" | jq .
@@ -29,7 +29,7 @@ attacker does not need to fully block the path.
    openssl crl -in /tmp/current.crl -inform DER -noout -nextupdate -lastupdate
    ```
 
-4. If the `vault` container itself is unhealthy, check whether the seal
+4. If the `vault` container is unhealthy, check whether the seal
    Vault (`vault-seal`) is reachable — the primary depends on it for
    auto-unseal on restart. See
    [`vault-seal-recovery.md`](vault-seal-recovery.md).
@@ -44,6 +44,6 @@ curl -s "http://localhost:${PROMETHEUS_PORT:-9090}/api/v1/query?query=pki_ocsp_r
 
 ## Post-incident
 
-Update the alert's `for:` duration or `ocsp_expiry` (Step 1.6) if this was
-a false positive caused by expected responder churn (e.g. a Vault restart
-during a routine deploy).
+Update the alert's `for:` duration or `ocsp_expiry` (Step 1.6) when expected
+responder churn, such as a Vault restart during routine deployment, caused a
+false positive.

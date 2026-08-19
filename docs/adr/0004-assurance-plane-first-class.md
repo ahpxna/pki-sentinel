@@ -9,7 +9,7 @@ measurement: a private CA, a single client platform, `tc netem` delay
 injection, and a manually-run script. That produced real findings (see
 `docs/benchmarks/`) but no durable capability — the moment the lab
 environment was torn down, the organization had no ongoing way to know
-whether its production clients were actually honoring revocation.
+whether its production clients were honoring revocation.
 
 ## Decision Drivers
 
@@ -27,23 +27,20 @@ whether its production clients were actually honoring revocation.
 
 ## Decision Outcome
 
-Make measurement a first-class, always-running component (`revocation-probe`
-+ `truststore-drift-agent`, together "the Assurance plane") rather than a
-one-off report. Per the master plan's own global contract: *"The Assurance
-plane is the differentiator. If a trade-off ever forces a cut, cut Issuance
-polish, never Assurance."*
+Make measurement a first-class, continuously running component
+(`revocation-probe` and `truststore-drift-agent`, together the Assurance
+plane) rather than a one-time report. Assurance capabilities take priority
+over nonessential Issuance-plane refinements when scope must be reduced.
 
 ## Consequences
 
-- Positive: pki-sentinel answers a question most PKI deployments never ask
-  continuously — "did that revocation actually work, for every client
-  profile we care about, right now?" — instead of asking it once during a
-  research project.
+- Positive: pki-sentinel continuously reports current revocation-enforcement
+  results for every configured client profile.
 - Negative: this is more component surface area (a second Go service, its
   own Prometheus metrics, its own Grafana dashboard, its own Dockerfile
-  deviating from the distroless norm — see ADR-0006) than a PKI-only repo
+  deviating from the distroless norm — see ADR-0006) than a PKI-only repository
   would need.
 - The chaos-sweep feature (Step 3.7) exists specifically so the original
   one-off soft-fail measurement becomes a repeatable, versioned artifact
-  (`docs/benchmarks/data/chaos-*.csv`) rather than a historical claim no one
-  can reproduce.
+  (`docs/benchmarks/data/chaos-*.csv`) rather than a non-reproducible
+  historical claim.

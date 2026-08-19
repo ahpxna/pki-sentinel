@@ -4,7 +4,7 @@ package main
 # the CRL quickly (see terraform/bootstrap/roles.tf). Deny any change that
 # grows its max_ttl beyond 30 minutes.
 
-deny[msg] {
+deny contains msg if {
 	resource := input.resource_changes[_]
 	resource.type == "vault_pki_secret_backend_role"
 	after := resource.change.after

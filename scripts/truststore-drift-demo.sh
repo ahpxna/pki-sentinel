@@ -12,8 +12,15 @@ cd "${REPO_ROOT}"
 mkdir -p .data/truststore/extra-cas
 dc() { docker compose run --rm -T truststore-drift-agent "$@"; }
 
+echo "[truststore-drift-demo] seeding a known-good CA in the isolated demo store..."
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj "/CN=Baseline Demo CA" \
+  -out .data/truststore/extra-cas/baseline.crt \
+  -keyout .data/truststore/baseline-ca.key 2>/dev/null
+
 echo "[truststore-drift-demo] 1/3 baselining the demo trust store..."
-dc baseline -o /data/baseline.json
+dc baseline -o /data/baseline.json \
+  --private-key /data/baseline.key --public-key /data/baseline.pub
 
 echo "[truststore-drift-demo] 2/3 installing a synthetic rogue CA..."
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
@@ -22,8 +29,14 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
 
 echo "[truststore-drift-demo] 3/3 checking for drift (expect exit=1, event mentions 'Rogue MITM CA')..."
 set +e
-dc check -b /data/baseline.json
+output="$(dc check -b /data/baseline.json --public-key /data/baseline.pub \
+  --log /data/truststore.json 2>&1)"
 status=$?
 set -e
+printf '%s\n' "${output}"
 echo "[truststore-drift-demo] exit=${status}"
-exit "${status}"
+if [[ "${status}" -ne 1 || "${output}" != *"Rogue MITM CA"* ]]; then
+  echo "[truststore-drift-demo] FATAL: expected exit=1 and a Rogue MITM CA event" >&2
+  exit 1
+fi
+echo "[truststore-drift-demo] detection verified"

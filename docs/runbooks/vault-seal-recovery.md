@@ -15,8 +15,7 @@ or revoked while Vault is sealed.
    docker compose logs --tail=200 vault | grep -i seal
    ```
 
-2. Confirm `vault-seal` (the transit auto-unseal key holder — a demo
-   stand-in for a cloud KMS, see
+2. Confirm `vault-seal` (the development transit auto-unseal key holder; see
    [ADR-0002](../adr/0002-auto-unseal-tradeoffs.md)) is healthy and its
    `transit/keys/autounseal` key still exists:
 
@@ -35,13 +34,12 @@ or revoked while Vault is sealed.
    docker compose restart vault
    ```
 
-4. If auto-unseal still fails (this is not expected with transit auto-unseal
-   — it should never require a manual unseal step), fall back to recovery
-   keys as a last resort:
+4. If auto-unseal still fails, use recovery keys as the final recovery
+   mechanism:
 
    ```bash
    jq -r '.recovery_keys_b64[]' .data/vault-init.json
-   # then, for each key:
+   # For each key:
    # docker compose exec vault vault operator unseal <key>
    ```
 
@@ -53,6 +51,6 @@ curl -s "http://localhost:${VAULT_PORT:-8200}/v1/sys/health" | jq -e '.sealed ==
 
 ## Post-incident
 
-If recovery keys were needed, this indicates a bug in the transit
-auto-unseal wiring — auto-unseal is supposed to make this step unreachable.
-File an issue and attach the `vault` and `vault-seal` container logs.
+Use of recovery keys indicates a defect in the transit auto-unseal
+configuration. File an issue with the `vault` and `vault-seal` container
+logs attached.

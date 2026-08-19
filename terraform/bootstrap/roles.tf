@@ -1,17 +1,17 @@
 resource "vault_pki_secret_backend_role" "server" {
-  backend          = vault_mount.pki_int.path
-  name             = "server"
-  allowed_domains  = [var.pki_domain]
-  allow_subdomains = true
+  backend            = vault_mount.pki_int.path
+  name               = "server"
+  allowed_domains    = [var.pki_domain]
+  allow_subdomains   = true
   allow_glob_domains = false
-  server_flag      = true
-  client_flag      = false
-  key_type         = "ec"
-  key_bits         = 256
-  allow_ip_sans    = true
-  no_store         = false
-  max_ttl          = "${var.leaf_max_ttl_hours}h"
-  ttl              = "${var.leaf_max_ttl_hours}h"
+  server_flag        = true
+  client_flag        = false
+  key_type           = "ec"
+  key_bits           = 256
+  allow_ip_sans      = true
+  no_store           = false
+  max_ttl            = "${var.leaf_max_ttl_hours}h"
+  ttl                = "${var.leaf_max_ttl_hours}h"
 }
 
 resource "vault_pki_secret_backend_role" "client" {
@@ -28,8 +28,8 @@ resource "vault_pki_secret_backend_role" "client" {
   ttl              = "${var.leaf_max_ttl_hours}h"
 }
 
-# Used exclusively by revocation-probe. Short TTL so revoked canaries expire
-# out of the CRL quickly and the CRL does not grow unbounded.
+# Used exclusively by revocation-probe. The short TTL removes expired canaries
+# from the CRL quickly and bounds CRL growth.
 resource "vault_pki_secret_backend_role" "canary" {
   backend          = vault_mount.pki_int.path
   name             = "canary"

@@ -18,12 +18,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26.5"
           cache-dependency-path: services/${{ matrix.service }}/go.sum
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12.2
           working-directory: services/${{ matrix.service }}
 
   lint-iac:
@@ -88,7 +88,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26.5"
       - name: go test
         working-directory: services/${{ matrix.service }}
         run: go test ./... -race -coverprofile=coverage.out
@@ -104,13 +104,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26.5"
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.5"
       - name: start stack
         run: |
           cp .env.example .env
+          ./scripts/prepare-dev-tls.sh
           source scripts/lib/wait_for.sh
           docker compose up -d
           wait_for_http "http://localhost:8200/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204" 120
@@ -129,7 +130,10 @@ jobs:
             --config services/revocation-probe/profiles.yaml > /tmp/cycle.json
           cat /tmp/cycle.json
       - name: go test -tags=integration
-        run: go test -tags=integration ./tests/integration/... -v
+        working-directory: tests/integration
+        env:
+          PROBE_REPORT: /tmp/cycle.json
+        run: go test -tags=integration ./... -v
       - name: step summary
         if: always()
         run: |

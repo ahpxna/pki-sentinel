@@ -1,0 +1,7 @@
+delay_ms,softfail_rate,source
+1955,0.00,prior_private_ca_testbed_summary
+1960,1.00,prior_private_ca_testbed_summary
+1970,0.00,prior_private_ca_testbed_summary
+1980,0.67,prior_private_ca_testbed_summary
+1990,1.00,prior_private_ca_testbed_summary
+2000,1.00,prior_private_ca_testbed_summary

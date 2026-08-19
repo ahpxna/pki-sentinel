@@ -25,7 +25,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, fmt, *args):
-        pass  # suppress default per-request access logging; we log alerts explicitly above
+        pass  # Suppress default access logging; alert payloads are logged above.
 
 
 if __name__ == "__main__":

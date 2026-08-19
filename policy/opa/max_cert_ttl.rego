@@ -6,9 +6,9 @@ package main
 # that grants long-lived leaves undermines that control regardless of how
 # well revocation itself is enforced.
 
-max_allowed_seconds := 90 * 24 * 3600
+max_allowed_seconds := (90 * 24) * 3600
 
-deny[msg] {
+deny contains msg if {
 	resource := input.resource_changes[_]
 	resource.type == "vault_pki_secret_backend_role"
 	after := resource.change.after

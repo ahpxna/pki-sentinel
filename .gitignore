@@ -1,6 +1,7 @@
 # ---- System junk ----
 .DS_Store
 *.pdf
+docs/private-conversations/
 
 # ---- Terraform ----
 .terraform/
@@ -13,8 +14,11 @@ crash.log
 # ---- Go ----
 bin/
 vendor/
+**/coverage.out
+__pycache__/
 
-# ---- Secrets & Environment ----
+# ---- Secrets & Environment / generated runtime state ----
 .env
 *.pem
 *.key
+.data/

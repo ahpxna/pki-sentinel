@@ -30,14 +30,11 @@ threshold.
 
 Short-lived certificates (`server`/`client` roles: 24h; `canary`: 10m) are
 the primary control. Revocation, CRL/OCSP, and the entire Assurance plane
-exist as defense in depth and as a way to continuously measure whether that
-defense in depth is actually working — not as the thing the system depends
-on to contain a compromised key.
+provide defense in depth and continuously measure revocation enforcement.
+Containment of a compromised key does not depend on revocation availability.
 
-This ADR is, in a real sense, the whole project's thesis statement: the
-Assurance plane (`revocation-probe`) is not decoration on top of a PKI —
-it exists specifically because revocation is the least trustworthy layer
-in the stack, and a layer you don't trust is a layer you have to measure.
+The Assurance plane (`revocation-probe`) measures the revocation layer because
+its behavior varies by client implementation and network conditions.
 
 ## Consequences
 
