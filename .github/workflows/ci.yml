@@ -105,6 +105,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26.5"
+          cache: false
       - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: "1.9.5"
@@ -120,7 +121,17 @@ jobs:
             docker compose ps --all
             docker compose logs --no-color
             docker compose down --remove-orphans
-            start_stack
+            if ! start_stack; then
+              compose_diagnostics="$(
+                docker compose ps --all
+                docker compose logs --no-color --tail=80
+              )"
+              compose_diagnostics="${compose_diagnostics//'%'/'%25'}"
+              compose_diagnostics="${compose_diagnostics//$'\r'/'%0D'}"
+              compose_diagnostics="${compose_diagnostics//$'\n'/'%0A'}"
+              echo "::error file=docker-compose.yml,line=1,title=Compose startup failed::${compose_diagnostics}"
+              exit 1
+            fi
           fi
           wait_for_http "http://localhost:8200/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204" 120
       - name: bootstrap
