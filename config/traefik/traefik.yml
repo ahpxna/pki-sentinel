@@ -12,8 +12,6 @@ entryPoints:
     address: ":8080"
 
 providers:
-  docker:
-    exposedByDefault: false
   file:
     directory: /etc/traefik/dynamic
     watch: true
@@ -26,10 +24,6 @@ certificatesResolvers:
       storage: /acme/acme.json
       keyType: EC256
       tlsChallenge: {}
-
-api:
-  dashboard: true
-  insecure: true
 
 # Enables the /ping endpoint used by the container healthcheck.
 ping: {}

@@ -40,11 +40,16 @@ autounseal key, and its own audit trail does not exist. In production this
 container is replaced by a cloud KMS or a hardware security module. The
 `seal` stanza retains the same purpose with provider-specific configuration.
 
-The transit seal client authenticates via the `VAULT_TOKEN` environment
-variable set on the `vault` container (verified against `vault server -help`
-and the primary Vault's boot logs), rather than a `token` field in the seal
-stanza, because Vault's transit seal reads the client token from the
-environment when the config block omits it.
+The transit seal client authenticates via `VAULT_TOKEN`, but that value is now
+a dedicated orphan periodic token whose policy permits only
+`transit/encrypt/autounseal` and `transit/decrypt/autounseal`. The primary
+Vault startup wrapper reads it from an ignored, read-only bind mount; the
+`VAULT_SEAL_TOKEN` development root token remains confined to `vault-seal`
+and its initializer.
+
+The seal service has no host-published listener. Bootstrap administration uses
+`docker compose exec` on the internal network rather than exposing the dev-mode
+Vault API on a host TCP port.
 
 ## Consequences
 
@@ -52,7 +57,9 @@ environment when the config block omits it.
   keys) are written to `.data/vault-init.json`, matching production recovery
   semantics under auto-unseal.
 - Negative: `vault-seal` is a single point of compromise for the whole
-  stack's seal material. This is called out in `SECURITY.md` and the
+  stack's seal material. A compromise of primary Vault reaches only transit
+  encryption/decryption, not seal-Vault administration. This is called out in
+  `SECURITY.md` and the
   README's "Production notes" table, with the production fix (cloud
   KMS/HSM) stated explicitly.
 - If `vault-seal` is unreachable, `vault` cannot unseal after a restart —

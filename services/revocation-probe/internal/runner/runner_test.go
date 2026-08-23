@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/canary"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/config"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
 )
@@ -17,14 +18,19 @@ func TestPollOneHonorsMaxAttempts(t *testing.T) {
 		MaxAttempts:  2,
 	}}
 	p := profiles.Profile{
-		Name:   "accepting",
-		Method: profiles.MethodNone,
-		Probe: func(context.Context, profiles.Target) (profiles.Outcome, error) {
-			return profiles.OutcomeAccepted, nil
+		Name:   "unexpected-accept",
+		Role:   profiles.RoleClientExecutor,
+		Method: profiles.MethodOCSPStapled,
+		Expectations: map[profiles.Scenario]profiles.Expectation{
+			profiles.ScenarioRevokedStaple: {Before: profiles.DecisionAccept, After: profiles.DecisionReject},
+		},
+		Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
+			return profiles.Observation{Decision: profiles.DecisionAccept, Reason: profiles.ReasonStatusGood}, nil
 		},
 	}
-	result := r.pollOne(context.Background(), p, profiles.Target{}, time.Now())
-	if result.Outcome != profiles.OutcomeAccepted || result.Attempts != 2 {
+	target := profiles.Target{Scenario: profiles.ScenarioRevokedStaple}
+	result := r.pollOne(context.Background(), p, target, time.Now())
+	if result.Decision != profiles.DecisionAccept || result.ExpectationMet || result.Attempts != 2 {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 }
@@ -37,13 +43,31 @@ func TestPollOneDoesNotConvertHarnessErrorToSoftFail(t *testing.T) {
 	}}
 	p := profiles.Profile{
 		Name:   "broken",
+		Role:   profiles.RoleStatusOracle,
 		Method: profiles.MethodCRL,
-		Probe: func(context.Context, profiles.Target) (profiles.Outcome, error) {
-			return profiles.OutcomeError, errors.New("responder unavailable")
+		Expectations: map[profiles.Scenario]profiles.Expectation{
+			profiles.ScenarioRevokedStaple: {Before: profiles.DecisionAccept, After: profiles.DecisionReject},
+		},
+		Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
+			return profiles.Observation{Decision: profiles.DecisionHarnessError, Reason: profiles.ReasonHarnessFailure}, errors.New("invalid harness configuration")
 		},
 	}
-	result := r.pollOne(context.Background(), p, profiles.Target{}, time.Now())
-	if result.Outcome != profiles.OutcomeError || result.Err == "" {
+	target := profiles.Target{Scenario: profiles.ScenarioRevokedStaple}
+	result := r.pollOne(context.Background(), p, target, time.Now())
+	if result.Decision != profiles.DecisionHarnessError || result.Err == "" {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestScenarioForStapling(t *testing.T) {
+	cases := map[canary.StaplingMode]profiles.Scenario{
+		canary.StaplingOn:    profiles.ScenarioRevokedStaple,
+		canary.StaplingOff:   profiles.ScenarioMissingStaple,
+		canary.StaplingStale: profiles.ScenarioCachedGoodStaple,
+	}
+	for mode, expected := range cases {
+		if got := scenarioForStapling(mode); got != expected {
+			t.Errorf("mode %s: got %s, expected %s", mode, got, expected)
+		}
 	}
 }

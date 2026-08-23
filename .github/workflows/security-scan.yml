@@ -15,24 +15,32 @@ jobs:
   secret-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - name: install gitleaks 8.30.1
+      - name: install gitleaks 8.30.0 with checksum verification
         run: |
           curl -fsSLo gitleaks.tar.gz \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.0/gitleaks_8.30.0_linux_x64.tar.gz
+          echo "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e  gitleaks.tar.gz" | sha256sum --check --strict
           tar -xzf gitleaks.tar.gz gitleaks
           sudo install gitleaks /usr/local/bin/gitleaks
+      - name: verify detector with a synthetic credential
+        run: |
+          printf 'token = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"\n' > /tmp/gitleaks-smoke.txt
+          if gitleaks detect --no-git --source /tmp/gitleaks-smoke.txt --redact; then
+            echo "gitleaks failed its synthetic-credential smoke test" >&2
+            exit 1
+          fi
       - name: scan repository history
         run: gitleaks git --no-banner --redact --verbose .
 
   fs-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: trivy filesystem scan
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -41,7 +49,7 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           limit-severities-for-sarif: true
-      - uses: github/codeql-action/upload-sarif@v4
+      - uses: github/codeql-action/upload-sarif@4c0873ef8656cb3c50b3f42fb63bc1ade0cfa827 # v4
         if: always()
         with:
           sarif_file: trivy-fs.sarif
@@ -60,11 +68,11 @@ jobs:
           - service: webhook-logger
             context: observability/webhook-logger
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: build image
         run: docker build -t pki-sentinel/${{ matrix.service }}:ci ${{ matrix.context }}
       - name: trivy image scan
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           image-ref: pki-sentinel/${{ matrix.service }}:ci
           severity: CRITICAL,HIGH
@@ -73,7 +81,7 @@ jobs:
           format: sarif
           output: trivy-image-${{ matrix.service }}.sarif
           limit-severities-for-sarif: true
-      - uses: github/codeql-action/upload-sarif@v4
+      - uses: github/codeql-action/upload-sarif@4c0873ef8656cb3c50b3f42fb63bc1ade0cfa827 # v4
         if: always()
         with:
           sarif_file: trivy-image-${{ matrix.service }}.sarif
@@ -81,16 +89,16 @@ jobs:
   iac-misconfig:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: trivy config scan
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           scan-type: config
           scan-ref: terraform/
           severity: CRITICAL
           exit-code: "1"
       - name: checkov
-        uses: bridgecrewio/checkov-action@v12.2915.0
+        uses: bridgecrewio/checkov-action@30ab847c9afc9977d1e8611da1f7e03a7260b715 # v12.2915.0
         with:
           directory: terraform/
           soft_fail: false
@@ -98,11 +106,12 @@ jobs:
   opa-policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - name: install conftest 0.69.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: install conftest 0.69.0 with checksum verification
         run: |
           curl -fsSLo conftest.tar.gz \
             https://github.com/open-policy-agent/conftest/releases/download/v0.69.0/conftest_0.69.0_Linux_x86_64.tar.gz
+          echo "96fc2fbf11f0afde51256647127e6f00a64ce839a4d9a0a1aef2426c0e6f4b3f  conftest.tar.gz" | sha256sum --check --strict
           tar -xzf conftest.tar.gz conftest
           sudo install conftest /usr/local/bin/conftest
       - name: conftest policy regression tests
@@ -119,19 +128,19 @@ jobs:
       matrix:
         service: [demo-api, revocation-probe, truststore-drift-agent]
     steps:
-      - uses: actions/checkout@v7
-      - uses: github/codeql-action/init@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: github/codeql-action/init@4c0873ef8656cb3c50b3f42fb63bc1ade0cfa827 # v4
         with:
           languages: go
           source-root: services/${{ matrix.service }}
-      - uses: github/codeql-action/autobuild@v4
-      - uses: github/codeql-action/analyze@v4
+      - uses: github/codeql-action/autobuild@4c0873ef8656cb3c50b3f42fb63bc1ade0cfa827 # v4
+      - uses: github/codeql-action/analyze@4c0873ef8656cb3c50b3f42fb63bc1ade0cfa827 # v4
 
   dependency-review:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/dependency-review-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
         with:
           fail-on-severity: high

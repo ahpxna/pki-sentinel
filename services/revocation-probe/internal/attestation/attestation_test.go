@@ -1,0 +1,47 @@
+package attestation
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"testing"
+	"time"
+)
+
+func TestSignAndVerify(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
+	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+
+	envelope, err := Sign(privatePEM, map[string]string{"decision": "REJECT"}, time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(publicPEM, envelope); err != nil {
+		t.Fatalf("verify signed envelope: %v", err)
+	}
+	envelope.Payload[0] ^= 1
+	if err := Verify(publicPEM, envelope); err == nil {
+		t.Fatal("verify accepted a modified payload")
+	}
+}
+
+func TestSignRejectsNonEd25519Key(t *testing.T) {
+	t.Parallel()
+	if _, err := Sign([]byte("not a key"), map[string]string{}, time.Now()); err == nil {
+		t.Fatal("Sign accepted an invalid key")
+	}
+}

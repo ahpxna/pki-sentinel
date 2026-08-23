@@ -1,5 +1,5 @@
 {
-  "title": "Certificate Inventory",
+  "title": "Canary Certificate Health",
   "uid": "pki-cert-inventory",
   "schemaVersion": 39,
   "version": 1,
@@ -12,7 +12,7 @@
     {
       "id": 1,
       "type": "table",
-      "title": "Tracked certificates: CN, serial, days to expiry",
+      "title": "Current ephemeral canary: days to expiry",
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
@@ -20,7 +20,7 @@
           "expr": "(pki_cert_not_after_timestamp_seconds - time()) / 86400",
           "format": "table",
           "instant": true,
-          "legendFormat": "{{cn}}",
+          "legendFormat": "current canary",
           "refId": "A"
         }
       ]
@@ -28,7 +28,7 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Certificates expiring within 7 days",
+      "title": "Current canary expires within 7 days",
       "gridPos": { "h": 6, "w": 12, "x": 0, "y": 10 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [

@@ -43,7 +43,23 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Certificate {{ $labels.cn }} (serial {{ $labels.serial }}) expires within 7 days"
+          summary: "The current ephemeral canary certificate expires within 7 days"
+
+      - alert: TruststoreBaselineInvalid
+        expr: pki_truststore_baseline_valid != 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The trust-store baseline is missing or has an invalid signature"
+
+      - alert: TruststoreDriftDetected
+        expr: (pki_truststore_unknown_roots + pki_truststore_missing_roots + pki_truststore_changed_roots + pki_truststore_expired_roots) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The observed trust store differs from its signed baseline"
 
       - alert: ProbeCycleFailing
         expr: increase(pki_revocation_cycle_total{result="error"}[1h]) > 2
@@ -52,4 +68,12 @@ groups:
           severity: warning
         annotations:
           summary: "revocation-probe has had more than 2 failed cycles in the last hour"
+          runbook_url: "https://github.com/ahpxna/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"
+
+      - alert: AssuranceRegressionDetected
+        expr: increase(pki_revocation_cycle_total{result="regression"}[1h]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "A relying-party decision violated its scenario contract"
           runbook_url: "https://github.com/ahpxna/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"

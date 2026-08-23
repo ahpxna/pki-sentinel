@@ -1,6 +1,7 @@
 // Package metrics defines and serves the Prometheus metrics exported by
-// revocation-probe. Metric names are a stable contract: Grafana dashboards
-// and CI assertions in later phases depend on them verbatim — do not rename.
+// revocation-probe. Labels are intentionally bounded; certificate serials,
+// random hostnames, and raw evidence belong in JSON records rather than TSDB
+// labels.
 package metrics
 
 import (
@@ -32,9 +33,14 @@ var (
 		Help: "Count of cycles where a profile correctly rejected a revoked certificate.",
 	}, []string{"profile", "method", "stapling"})
 
+	AssuranceObservations = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pki_assurance_observations_total",
+		Help: "Count of assurance observations by bounded decision and reason dimensions.",
+	}, []string{"profile", "role", "method", "scenario", "decision", "reason"})
+
 	CycleTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "pki_revocation_cycle_total",
-		Help: "Count of probe cycles by result (ok|error).",
+		Help: "Count of probe cycles by result (ok|error|regression).",
 	}, []string{"result"})
 
 	LastCycleTimestamp = promauto.NewGauge(prometheus.GaugeOpts{
@@ -63,16 +69,18 @@ var (
 		Help: "Number of revoked certificate entries in the current CRL.",
 	})
 
-	CertNotAfter = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	CertNotAfter = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "pki_cert_not_after_timestamp_seconds",
-		Help: "NotAfter timestamp (unix seconds) of a tracked certificate.",
-	}, []string{"cn", "serial", "source"})
+		Help: "NotAfter timestamp (unix seconds) of the current ephemeral canary certificate.",
+	})
 
-	ChaosSoftfailRate = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "pki_chaos_softfail_rate",
-		Help: "Soft-fail rate observed at a given injected OCSP-path delay, from --chaos sweeps.",
-	}, []string{"delay_ms"})
 )
+
+// RecordObservation records bounded assurance dimensions. Unbounded evidence
+// such as certificate serials and output hashes is retained only in JSON.
+func RecordObservation(profile, role, method, scenario, decision, reason string) {
+	AssuranceObservations.WithLabelValues(profile, role, method, scenario, decision, reason).Inc()
+}
 
 // Serve starts the metrics/health HTTP server and blocks until ctx is
 // cancelled.

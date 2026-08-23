@@ -10,8 +10,8 @@ resource "vault_pki_secret_backend_role" "server" {
   key_bits           = 256
   allow_ip_sans      = true
   no_store           = false
-  max_ttl            = "${var.leaf_max_ttl_hours}h"
-  ttl                = "${var.leaf_max_ttl_hours}h"
+  max_ttl            = tostring(var.leaf_max_ttl_hours * 3600)
+  ttl                = tostring(var.leaf_max_ttl_hours * 3600)
 }
 
 resource "vault_pki_secret_backend_role" "client" {
@@ -24,8 +24,8 @@ resource "vault_pki_secret_backend_role" "client" {
   key_type         = "ec"
   key_bits         = 256
   no_store         = false
-  max_ttl          = "${var.leaf_max_ttl_hours}h"
-  ttl              = "${var.leaf_max_ttl_hours}h"
+  max_ttl          = tostring(var.leaf_max_ttl_hours * 3600)
+  ttl              = tostring(var.leaf_max_ttl_hours * 3600)
 }
 
 # Used exclusively by revocation-probe. The short TTL removes expired canaries
@@ -40,6 +40,6 @@ resource "vault_pki_secret_backend_role" "canary" {
   key_type         = "ec"
   key_bits         = 256
   no_store         = false
-  ttl              = "10m"
-  max_ttl          = "30m"
+  ttl              = "600"
+  max_ttl          = "1800"
 }

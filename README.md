@@ -1,6 +1,6 @@
 # pki-sentinel
 
-**Internal PKI for SMEs with continuous evidence that clients reject revoked certificates.**
+**Continuous relying-party assurance for private PKI.**
 
 ![CI](https://github.com/ahpxna/pki-sentinel/actions/workflows/ci.yml/badge.svg)
 ![Security Scan](https://github.com/ahpxna/pki-sentinel/actions/workflows/security-scan.yml/badge.svg)
@@ -15,14 +15,18 @@ The terminal demo recording is reproducible with
 
 ## Rationale
 
-Many SMEs running internal services either omit TLS, maintain an unrotated
-self-signed CA, or deploy PKI without an ongoing certificate lifecycle.
-Certificate issuance and renewal often remain manual processes.
+Certificate authorities answer whether a certificate has been revoked. They do
+not prove that a specific version of curl, Go, Python, OpenSSL, or an application
+runtime will enforce that status. PKI Sentinel measures that missing security
+property:
 
-Organizations that deploy certificate revocation rarely verify client
-enforcement. Revocation checking is treated as a checkbox — CRL distribution
-point configured, OCSP responder running — rather than a property that has to
-be continuously measured against real client behavior.
+```text
+issuer acknowledges revocation
+        -> status oracle confirms REVOKED
+        -> real relying-party client executes
+        -> decision + reason + environment evidence
+        -> scenario contract passes or reports a security regression
+```
 
 That gap is not hypothetical. A controlled private-CA testbed (see
 [`docs/benchmarks/`](docs/benchmarks/)) showed the OCSP soft-fail transition
@@ -34,8 +38,8 @@ because that failure mode is invisible at the TLS layer by design. Both
 findings and their reproduction in this repository are documented in
 [`docs/benchmarks/`](docs/benchmarks/).
 
-pki-sentinel treats revocation enforcement as a continuously measured product
-feature (the **Assurance plane**) rather than a one-time laboratory finding.
+PKI Sentinel treats Vault as the first issuer adapter and revocation enforcement
+as the core product. Issuance breadth is secondary to evidence correctness.
 
 ## Quick start (3 commands)
 
@@ -60,13 +64,11 @@ pki-sentinel has three planes. The Assurance plane is the differentiator —
 see [`docs/architecture.md`](docs/architecture.md) for the full diagram and
 [ADR-0004](docs/adr/0004-assurance-plane-first-class.md) for why.
 
-![pki-sentinel architecture](docs/images/architecture.svg)
-
 | Plane | Responsibility |
 |---|---|
-| **Issuance** | Vault/OpenBao PKI (Root + Intermediate), ACME endpoint, Traefik edge, short-lived certs |
-| **Assurance** | `revocation-probe` continuously issues a canary cert, revokes it, and measures each client profile's result. `truststore-drift-agent` detects unauthorized root CA installation. |
-| **Governance** | Prometheus/Grafana/Alertmanager, Wazuh custom decoders for Vault audit logs, OPA policy gates in CI |
+| **Issuance** | Vault PKI adapter, root and intermediate authorities, ACME endpoint, Traefik edge, short-lived canaries |
+| **Assurance** | Scenario controller, isolated OCSP/CRL status oracles and relying-party executors, decision/reason evidence, signed attestations, trust-policy conformance |
+| **Governance** | Bounded Prometheus metrics, Grafana assurance matrix, Alertmanager, signed trust baselines, CI policy and Wazuh fixture gates |
 
 ## Included capabilities
 
@@ -75,27 +77,40 @@ see [`docs/architecture.md`](docs/architecture.md) for the full diagram and
   declared in Terraform.
 - Traefik obtaining certificates from Vault's ACME endpoint with zero
   manual steps.
-- A continuous revocation-enforcement probe across 7 real client
-  configurations (`openssl`, `curl` with and without `--cert-status`, Go
-  `crypto/tls`, Python `requests`, CRL-based checking).
-- A repeatable `tc netem` latency-injection sweep that reproduces the OCSP
-  soft-fail transition-band finding on demand.
-- A trust-store drift detector for the one MITM scenario that TLS itself
-  cannot see.
+- An assurance engine that separates OCSP/CRL status oracles from six
+  relying-party/client checks and records `decision`, `reason`, scenario,
+  client fingerprint, output hashes, exit code, certificate serial, revocation
+  acknowledgement, and decision latency in JSON evidence.
+- Correct `curl --cert-status` semantics: missing, invalid, and revoked OCSP
+  status all reject instead of being misclassified as acceptance.
+- Both Go's default TLS behavior and a separately named custom
+  `go-hardfail-ocsp` validator.
+- A one-shot, responder-scoped fault proxy supporting latency, connection
+  drop/reset, timeout, HTTP 500, and malformed OCSP response injection. It
+  accepts only the OCSP path, so no `NET_ADMIN` capability is required and
+  issuer, CRL, and target-service traffic remain unaffected.
+- One network-isolated executor container per status-oracle or client profile.
+  The controller runs no profile subprocesses when deployed through Compose.
+- Ed25519-signed, tamper-evident assurance-report envelopes with an offline
+  verification command.
+- A trust-store exporter with `/metrics` and `/events`, signed-baseline
+  verification, and detection of added, removed, changed, expired, and
+  expiring roots.
 - Prometheus/Grafana/Alertmanager wired end-to-end, including a working
   alert path even without a real Slack workspace.
-- Wazuh decoders/rules over Vault's audit log, keyed on security-significant
-  events (a root-CA write outside bootstrap, AppRole brute force, policy
-  changes).
+- Optional Wazuh decoder/rule assets for Vault audit events, with a CI
+  `wazuh-logtest` fixture gate for the certificate-revocation rule.
 - A CI pipeline that gates on security *properties* (an integration test
-  that asserts revocation detection by real clients), not only lint.
+  that asserts oracle status and scenario contracts), a live Terraform-plan
+  OPA gate, not only lint.
 
 ## Try the demo
 
 ```bash
-make demo-revoke              # one probe cycle; detection table with soft-fail rows
-make chaos-sweep              # latency sweep; writes docs/benchmarks/data/chaos-*.csv
+make demo-revoke              # one probe cycle; decision/reason evidence table
+make chaos-sweep              # one-shot direct-OCSP latency experiment
 make truststore-drift-demo    # installs a synthetic rogue CA and verifies detection
+make wazuh-logtest            # evaluates the revoke audit fixture against rule 100101
 ```
 
 ## Verification workflow
@@ -107,7 +122,7 @@ make bootstrap                # clean-stack bootstrap, PKI apply, ACME, AppRole,
 make demo-revoke              # writes .data/last-cycle.json after the 180-second enforcement cycle
 make test-integration         # validates the cycle report, live metrics, and signed trust-store drift
 make truststore-drift-demo    # isolated rogue-root detection test
-make up-full                  # starts Prometheus, Grafana, Alertmanager, and the webhook receiver
+make up-full                  # adds Prometheus, Grafana, Alertmanager, truststore exporter
 make test                     # Go unit tests with the race detector
 make lint                     # Shell, Terraform, Go, and Dockerfile linters
 make scan                     # Gitleaks and Trivy; both commands fail on findings
@@ -118,20 +133,39 @@ material, local TLS keys, and Terraform state. The integration target consumes
 the report produced by `make demo-revoke`, which keeps macOS and Linux results
 consistent even though the macOS system curl lacks `--cert-status` support.
 
-## Client profile results table
+## Signed assurance evidence
 
-The baseline matrix identifies which clients check revocation and which do
-not. `make demo-revoke` reproduces it against the running stack.
+Create a local demo keypair, then run a cycle. The key lives only under the
+ignored `.data/attestation/` directory; it must be replaced with an external
+KMS/HSM signer in production.
 
-| Profile | Method | Expected baseline |
-|---|---|---|
-| `openssl-ocsp-direct` | OCSP (direct query) | **rejected** — ground-truth oracle |
-| `curl-cert-status` | OCSP (stapled) | rejected when stapling on; **accepted** when stapling off |
-| `curl-default` | none | **accepted** — curl does no revocation check by default |
-| `go-tls-default` | none | **accepted** — Go stdlib does not check revocation |
-| `go-tls-ocsp` | OCSP (stapled) | rejected when stapled |
-| `python-requests` | none | **accepted** |
-| `crl-check` | Delta CRL | rejected after the one-minute delta rebuild interval |
+```bash
+make attestation-key
+make demo-revoke
+```
+
+When the key is mounted at `/run/attestation/` for the probe process,
+`demo-revoke` writes `last-cycle.attestation.json` and verifies it using the
+public key. A standalone process can produce the same envelope with
+`probe run --attestation-key ... --attestation-out ...`; verify it with
+`probe attest verify --public-key ... --input ...`.
+
+## Assurance matrix
+
+The default `revoked_staple` scenario requires status oracles to confirm
+`REVOKED` before relying-party results are recorded. A result satisfies an
+explicit scenario contract; a TLS or network failure is `INCONCLUSIVE`, not a
+successful rejection.
+
+| Profile | Role | Method | `revoked_staple` contract |
+|---|---|---|---|
+| `openssl-ocsp-direct` | status oracle | direct OCSP | `REJECT / REVOKED` |
+| `crl-check` | status oracle | delta CRL | `REJECT / REVOKED` after CRL rebuild |
+| `curl-cert-status` | client executor | stapled OCSP | `REJECT`; reason derived from libcurl evidence |
+| `curl-default` | client executor | none | `ACCEPT / NO_REVOCATION_CHECK` |
+| `go-tls-default` | client executor | none | `ACCEPT / NO_REVOCATION_CHECK` |
+| `go-hardfail-ocsp` | client executor | custom stapled OCSP validation | `REJECT / REVOKED` |
+| `python-requests` | client executor | none | `ACCEPT / NO_REVOCATION_CHECK` |
 
 Most default client configurations accept a revoked certificate
 indefinitely. That is not a bug in the harness — it is this product's
@@ -146,19 +180,22 @@ convenience. None of them are hidden — see also `SECURITY.md` and
 | Demo shortcut | Risk | Production fix |
 |---|---|---|
 | Root CA online in Vault | root key compromise = total trust failure | offline root on HSM/smartcard; sign the intermediate manually, annually |
-| Transit auto-unseal via a second Vault | seal Vault compromise unseals everything | AWS KMS / GCP KMS / Azure Key Vault / HSM |
+| Transit auto-unseal via a second dev-mode Vault | seal Vault compromise unseals everything | AWS KMS / GCP KMS / Azure Key Vault / HSM; the seal service has no host-published API port |
 | Vault listener `tls_disable = true` | plaintext on the Docker bridge | TLS on the listener with a bootstrap cert |
 | Recovery keys in `.data/vault-init.json` | plaintext key material on disk | PGP-encrypted shares distributed to separate key holders |
 | `GRAFANA_ADMIN_PASSWORD` in `.env` | trivial credential | SSO/OIDC |
 | ACME with no External Account Binding | any workload on the network can request a cert | `eab_policy: always-required` |
+| Static non-expiring AppRole SecretIDs | credential remains usable until revoked | workload identity or automated response-wrapped SecretID rotation |
+| Dev-mode seal Vault | compromise of the seal service reaches seal-Vault administration | KMS/HSM; the primary Vault already receives only an encrypt/decrypt-only transit token |
 
 ## Roadmap
 
-- Kubernetes/Helm chart (see [ADR-0005](docs/adr/0005-compose-over-kubernetes.md))
-- HSM-backed root CA
-- cert-manager issuer for the Vault PKI backend
-- Windows trust-store drift agent
-- EST/SCEP support alongside ACME
+1. Add unknown-status and expired-status OCSP response generators to the
+   responder-only fault proxy.
+2. Move local demo attestation signing to a KMS/HSM-backed signing service.
+3. Enforce declarative scenario manifests in CI.
+4. Add issuer adapters for OpenBao and step-ca after the assurance contracts
+   are stable.
 
 ## License
 
@@ -171,7 +208,7 @@ Built on HashiCorp Vault, Traefik, Prometheus, Grafana, and Wazuh.
 ## Research basis
 
 - [`docs/benchmarks/ocsp-softfail-thresholds.md`](docs/benchmarks/ocsp-softfail-thresholds.md)
-  documents the private-CA and `tc netem` latency methodology and its data
-  limitations.
+  separates the prior private-CA/`tc netem` client experiment from the current
+  responder-scoped direct-oracle sweep and documents both sets of limitations.
 - [`docs/benchmarks/trusted-ca-mitm.md`](docs/benchmarks/trusted-ca-mitm.md)
   documents the trusted-root interception result and trust-store control.

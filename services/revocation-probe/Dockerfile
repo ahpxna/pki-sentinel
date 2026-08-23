@@ -1,28 +1,23 @@
 # syntax=docker/dockerfile:1
 #
-# Deliberately NOT distroless: profiles shell out to curl, openssl, python3,
-# and tc. See docs/adr/0006-alpine-over-distroless-for-probe.md and
+# Deliberately NOT distroless: profiles shell out to curl, openssl, and
+# python3. See docs/adr/0006-alpine-over-distroless-for-probe.md and
 # SECURITY.md for the reasoning and the compensating controls (non-root
-# user, capability scoped to CAP_NET_ADMIN only, image scanned in CI).
-FROM golang:1.26.6-alpine3.23 AS builder
+# user, no added capability in the continuous service, image scanned in CI).
+FROM golang:1.26.6-alpine3.23@sha256:e57c41c1d5864341031181b0db34b9a537bb5773eb6428e4e5bdaea0f9135406 AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/probe ./cmd/probe
 
-FROM alpine:3.23
-# Exact apk revisions are intentionally inherited from the pinned Alpine
-# repository snapshot represented by the base image tag.
+FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+# The base image is digest-pinned. Alpine repository packages remain a
+# rebuild-time input until a package snapshot mirror is introduced.
 # hadolint ignore=DL3018
-RUN apk add --no-cache curl openssl python3 py3-requests iproute2 ca-certificates libcap \
+RUN apk add --no-cache curl openssl python3 py3-requests ca-certificates \
     && addgroup -S probe && adduser -S probe -G probe
 COPY --from=builder /out/probe /usr/local/bin/probe
-# `tc` needs CAP_NET_ADMIN even when the container itself has it via
-# cap_add, because that grant applies to the root process, not arbitrary
-# non-root users. File capabilities on the tc binary let the non-root
-# `probe` user invoke it without running the whole process as root.
-RUN setcap cap_net_admin=+ep /sbin/tc
 COPY profiles.yaml /etc/pki-sentinel/profiles.yaml
 WORKDIR /etc/pki-sentinel
 # hadolint ignore=DL3066

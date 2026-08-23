@@ -5,6 +5,20 @@ networks:
     name: ${COMPOSE_PROJECT_NAME:-pki-sentinel}
     driver: bridge
 
+x-profile-executor: &profile-executor
+  image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/revocation-probe:local
+  build:
+    context: ./services/revocation-probe
+  profiles: ["app"]
+  networks: [pki-sentinel]
+  entrypoint: ["probe"]
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8120/healthz"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 5s
+
 services:
   # Demo stand-in for a cloud KMS. Holds a transit key used to auto-unseal the
   # primary Vault. In production this would be AWS/GCP/Azure KMS or an HSM —
@@ -17,7 +31,6 @@ services:
       VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_SEAL_TOKEN}
       VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
       VAULT_ADDR: http://127.0.0.1:8200
-    ports: ["${VAULT_SEAL_PORT}:8200"]
     networks: [pki-sentinel]
     healthcheck:
       test: ["CMD", "vault", "status"]
@@ -41,6 +54,25 @@ services:
       - |
         vault secrets enable transit >/dev/null 2>&1 || true
         vault write -f transit/keys/autounseal >/dev/null
+        vault policy write pki-sentinel-autounseal - <<'POLICY'
+        path "transit/encrypt/autounseal" {
+          capabilities = ["update"]
+        }
+
+        path "transit/decrypt/autounseal" {
+          capabilities = ["update"]
+        }
+        POLICY
+        if [ -s /run/vault-seal/transit-token ] && \
+          VAULT_TOKEN="$(cat /run/vault-seal/transit-token)" vault token lookup >/dev/null 2>&1; then
+          exit 0
+        fi
+        umask 077
+        vault token create -orphan -policy=pki-sentinel-autounseal -period=24h \
+          -field=token > /run/vault-seal/transit-token
+        chmod 0400 /run/vault-seal/transit-token
+    volumes:
+      - ./.data/vault-seal:/run/vault-seal
     depends_on:
       vault-seal:
         condition: service_healthy
@@ -65,23 +97,23 @@ services:
     image: ${VAULT_IMAGE}
     container_name: pki-vault
     cap_add: ["IPC_LOCK"]
-    # The official entrypoint already injects -config=/vault/config. Passing
-    # the file again loads the transit seal twice and Vault aborts with
-    # "more than one enabled seal found".
-    command: server
+    # The root token for vault-seal is never injected into this container.
+    # Read a dedicated transit-only token before the official entrypoint drops
+    # privileges; it supplies the default configuration directory itself.
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export VAULT_TOKEN="$(cat /run/vault-seal/transit-token)"
+        exec /usr/local/bin/docker-entrypoint.sh vault server
     environment:
       VAULT_ADDR: http://127.0.0.1:8200
-      # Transit auto-unseal client token for vault-seal. Vault's transit seal
-      # stanza reads this from VAULT_TOKEN when no `token` field is set in
-      # the seal config (verified against `vault server -help` and container
-      # logs — see docs/adr/0002-auto-unseal-tradeoffs.md for the writeup).
-      VAULT_TOKEN: ${VAULT_SEAL_TOKEN}
     ports: ["${VAULT_PORT}:8200"]
     networks: [pki-sentinel]
     volumes:
       - ./config/vault:/vault/config:ro
       - ./.data/vault:/vault/data
       - ./.data/vault-logs:/vault/logs
+      - ./.data/vault-seal:/run/vault-seal:ro
     depends_on:
       vault-seal:
         condition: service_healthy
@@ -113,16 +145,13 @@ services:
     ports:
       - "${TRAEFIK_HTTP_PORT}:80"
       - "${TRAEFIK_HTTPS_PORT}:443"
-      - "${TRAEFIK_DASHBOARD_PORT}:8080"
     volumes:
       - ./config/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./config/traefik/dynamic:/etc/traefik/dynamic:ro
       - ./.data/traefik/acme:/acme
       - ./.data/traefik/logs:/var/log/traefik
       - ./.data/traefik/bootstrap:/etc/traefik/bootstrap:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      TRAEFIK_PROVIDERS_DOCKER_NETWORK: ${COMPOSE_PROJECT_NAME:-pki-sentinel}
       LEGO_CA_CERTIFICATES: /etc/traefik/bootstrap/vault-acme.crt
     depends_on:
       vault:
@@ -147,12 +176,6 @@ services:
       DEMO_API_LISTEN: ":8000"
     volumes:
       - ./.data/approle/demo-api.env:/run/secrets/demo-api.env:ro
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.demo-api.rule=Host(`api.internal`)
-      - traefik.http.routers.demo-api.entrypoints=websecure
-      - traefik.http.routers.demo-api.tls.certresolver=internal
-      - traefik.http.services.demo-api.loadbalancer.server.port=8000
     depends_on:
       vault:
         condition: service_healthy
@@ -164,20 +187,103 @@ services:
     container_name: pki-revocation-probe
     profiles: ["app"]
     networks: [pki-sentinel]
-    cap_add: ["NET_ADMIN"] # required for --chaos tc netem sweeps (Step 3.7)
     environment:
       VAULT_ADDR: http://vault:8200
       # The probe runs inside Compose, so localhost would point back to the
       # probe container rather than Vault.
       VAULT_PUBLIC_ADDR: http://vault:8200
       PKI_DOMAIN: ${PKI_DOMAIN}
+      # Each profile is executed through its own network-isolated container.
+      # The canary binds only on the Compose bridge and is never host-published.
+      PROBE_CANARY_BIND_HOST: 0.0.0.0
+      PROBE_CANARY_CONNECT_HOST: revocation-probe
+      PROBE_EXECUTORS: openssl-ocsp-direct=http://profile-openssl:8120,crl-check=http://profile-crl:8120,curl-cert-status=http://profile-curl-cert-status:8120,curl-default=http://profile-curl-default:8120,go-tls-default=http://profile-go-default:8120,go-hardfail-ocsp=http://profile-go-hardfail:8120,python-requests=http://profile-python:8120
     env_file:
       - path: ./.data/approle/revocation-probe.env
         required: false
     ports: ["${PROBE_METRICS_PORT}:9110"]
     volumes:
       - ./docs/benchmarks/data:/etc/pki-sentinel/docs/benchmarks/data
+      - ./.data/attestation:/run/attestation
     restart: unless-stopped
+    depends_on:
+      vault:
+        condition: service_healthy
+      profile-openssl:
+        condition: service_healthy
+      profile-crl:
+        condition: service_healthy
+      profile-curl-cert-status:
+        condition: service_healthy
+      profile-curl-default:
+        condition: service_healthy
+      profile-go-default:
+        condition: service_healthy
+      profile-go-hardfail:
+        condition: service_healthy
+      profile-python:
+        condition: service_healthy
+
+  profile-openssl:
+    <<: *profile-executor
+    container_name: pki-profile-openssl
+    environment: {EXECUTOR_ID: profile-openssl}
+    command: ["executor", "--profile", "openssl-ocsp-direct"]
+
+  profile-crl:
+    <<: *profile-executor
+    container_name: pki-profile-crl
+    environment: {EXECUTOR_ID: profile-crl}
+    command: ["executor", "--profile", "crl-check"]
+
+  profile-curl-cert-status:
+    <<: *profile-executor
+    container_name: pki-profile-curl-cert-status
+    environment: {EXECUTOR_ID: profile-curl-cert-status}
+    command: ["executor", "--profile", "curl-cert-status"]
+
+  profile-curl-default:
+    <<: *profile-executor
+    container_name: pki-profile-curl-default
+    environment: {EXECUTOR_ID: profile-curl-default}
+    command: ["executor", "--profile", "curl-default"]
+
+  profile-go-default:
+    <<: *profile-executor
+    container_name: pki-profile-go-default
+    environment: {EXECUTOR_ID: profile-go-default}
+    command: ["executor", "--profile", "go-tls-default"]
+
+  profile-go-hardfail:
+    <<: *profile-executor
+    container_name: pki-profile-go-hardfail
+    environment: {EXECUTOR_ID: profile-go-hardfail}
+    command: ["executor", "--profile", "go-hardfail-ocsp"]
+
+  profile-python:
+    <<: *profile-executor
+    container_name: pki-profile-python
+    environment: {EXECUTOR_ID: profile-python}
+    command: ["executor", "--profile", "python-requests"]
+
+  # One-shot fault runner. Its loopback reverse proxy delays only the OCSP
+  # responder path; no Linux network capability is required.
+  chaos-runner:
+    image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/revocation-probe:local
+    build:
+      context: ./services/revocation-probe
+    container_name: pki-chaos-runner
+    profiles: ["chaos"]
+    networks: [pki-sentinel]
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_PUBLIC_ADDR: http://vault:8200
+      PKI_DOMAIN: ${PKI_DOMAIN}
+    env_file:
+      - path: ./.data/approle/revocation-probe.env
+        required: false
+    volumes:
+      - ./docs/benchmarks/data:/etc/pki-sentinel/docs/benchmarks/data
     depends_on:
       vault:
         condition: service_healthy

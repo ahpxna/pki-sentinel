@@ -1,11 +1,5 @@
-<!-- Custom decoder for Vault's JSON file audit device. -->
+<!-- Custom decoder for raw lines emitted by Vault's JSON file audit device. -->
 <decoder name="vault-audit">
-  <program_name>vault</program_name>
+  <prematch>^\{</prematch>
   <plugin_decoder>JSON_Decoder</plugin_decoder>
-</decoder>
-
-<decoder name="vault-audit-fields">
-  <parent>vault-audit</parent>
-  <use_own_name>true</use_own_name>
-  <json_null_field>true</json_null_field>
 </decoder>

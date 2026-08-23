@@ -1,5 +1,11 @@
 # pki-sentinel — Master Implementation Plan (Phase 0 → Phase 6)
 
+> **Status: historical implementation plan.** This document preserves the
+> original build sequence and is not an authoritative description of current
+> behavior. Use [`README.md`](../README.md) and
+> [`docs/architecture.md`](architecture.md) for implemented capabilities and
+> current assurance semantics.
+
 **Scope:** technical implementation plan for an environment with shell, file-write, and Docker access.
 **Runtime:** Docker Compose only. Kubernetes is explicitly out of scope for this plan.
 **Language of record:** all code, comments, commit messages, and documentation in English.

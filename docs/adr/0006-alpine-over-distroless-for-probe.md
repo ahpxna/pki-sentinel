@@ -11,8 +11,8 @@ pattern: several of its client profiles (`openssl-ocsp-direct`,
 `curl-cert-status`, `curl-default`, `python-requests`) are deliberately
 *subprocess wrappers around real client tooling*. The profile matrix must
 observe actual, unmodified client behavior rather than a Go approximation of
-other clients. The chaos
-sweep (Step 3.7) also shells out to `tc`.
+other clients. Chaos injection is implemented in-process and does not add an
+operating-system package or Linux capability.
 
 ## Decision Drivers
 
@@ -26,10 +26,8 @@ sweep (Step 3.7) also shells out to `tc`.
 1. Distroless, and reimplement every profile in pure Go. Rejected: a
    Go reimplementation of curl's or Python requests' revocation behavior is
    not evidence of observed curl or Python Requests behavior.
-2. Alpine 3.20 with exactly the tools the profiles need
-   (`curl openssl python3 py3-requests iproute2 ca-certificates`), non-root
-   user, `tc` capability scoped via file capability (`setcap
-   cap_net_admin=+ep`) rather than running the whole container as root.
+2. Alpine with exactly the tools the profiles need
+   (`curl openssl python3 py3-requests ca-certificates`) and a non-root user.
 
 ## Decision Outcome
 
@@ -41,7 +39,8 @@ links to this documented exception to the distroless standard.
 
 - Positive: profile results are evidence about real client software, not
   about this project's reimplementation of it.
-- Negative: larger image, non-trivial package surface (`python3`, `curl`,
-  `openssl`), all of which are pinned and scanned. `NET_ADMIN` is
-  compose-level `cap_add` on this one service only — no other service in
-  the stack has it.
+- Negative: larger image and non-trivial package surface (`python3`, `curl`,
+  `openssl`). The image is digest-pinned and scanned, but Alpine packages
+  remain rebuild-time inputs until a snapshot repository is introduced.
+- Positive: the responder-only fault proxy requires no `NET_ADMIN` capability
+  and cannot delay unrelated container traffic.

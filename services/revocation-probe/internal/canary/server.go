@@ -42,10 +42,16 @@ type tlsServer struct {
 	config *tls.Config
 }
 
-// Start binds to 127.0.0.1:<random free port>, adds a temporary /etc/hosts
-// entry for hostname, and begins serving certPEM/keyPEM with the given
-// OCSP staple (may be nil for StaplingOff).
+// Start binds to 127.0.0.1:<random free port> and begins serving
+// certPEM/keyPEM with the given OCSP staple (may be nil for StaplingOff).
 func Start(hostname string, certPEM, keyPEM []byte, staple []byte) (*Server, error) {
+	return StartOn("127.0.0.1", hostname, certPEM, keyPEM, staple)
+}
+
+// StartOn binds to bindHost:<random free port>. Containerized client
+// executors use 0.0.0.0 here and reach the service through its Compose DNS
+// name; local and integration callers retain the loopback-only default.
+func StartOn(bindHost, hostname string, certPEM, keyPEM []byte, staple []byte) (*Server, error) {
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("canary: loading keypair: %w", err)
@@ -54,7 +60,7 @@ func Start(hostname string, certPEM, keyPEM []byte, staple []byte) (*Server, err
 		cert.OCSPStaple = staple
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", net.JoinHostPort(bindHost, "0"))
 	if err != nil {
 		return nil, fmt.Errorf("canary: listening: %w", err)
 	}

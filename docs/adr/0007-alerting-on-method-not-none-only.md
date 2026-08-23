@@ -33,10 +33,10 @@ excludes `method="none"`:
 ```
 increase(pki_revocation_softfail_total{method!="none"}[30m]) > 0
 ```
-The `method="none"` cohort is still fully recorded in
-`pki_revocation_softfail_total` and shown in the "Profile × Method × Last
-Outcome" table on the `revocation-slo` dashboard. This cohort is a reporting
-concern rather than a paging condition.
+The `method="none"` cohort is recorded in
+`pki_assurance_observations_total` with decision `ACCEPT` and reason
+`NO_REVOCATION_CHECK`, then shown in the Assurance Matrix dashboard. It is a
+reporting concern rather than a paging condition.
 
 ## Consequences
 

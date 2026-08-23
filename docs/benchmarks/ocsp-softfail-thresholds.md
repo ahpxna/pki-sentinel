@@ -39,27 +39,26 @@ as inexperience.
 ## Reproduction with pki-sentinel
 
 `make chaos-sweep` (backed by `internal/chaos` and the `probe chaos sweep`
-subcommand) reproduces this experiment on a different stack: Vault PKI
-instead of OpenSSL's `openssl ocsp`, and — unlike the original single-client
-run — the full seven-profile matrix instead of one client. The sweep
-defaults to the same dense delay list near 2s
+subcommand) runs a narrower experiment on a different stack: Vault PKI and the
+`openssl-ocsp-direct` status oracle. An in-process reverse proxy delays only
+requests to `/v1/pki_int/ocsp`; issuer, CRL, and target-service traffic bypasses
+the proxy. It does not execute the client matrix. Results therefore describe a
+direct OCSP oracle under responder-scoped latency and must not be generalized
+to TLS client soft-fail behavior. The sweep defaults to the same dense delay list near 2s
 (`chaos.DefaultDelaysMS`: 0, 100, 500, 1000, 1500, 1700, 1900, 1950, 1960,
 1970, 1980, 1990, 2000ms) specifically so new runs are comparable to the
 original figures.
 
-Each run writes `docs/benchmarks/data/chaos-<timestamp>.csv` (columns:
-`delay_ms,softfail_rate`) and updates the `pki_chaos_softfail_rate{delay_ms}`
-Grafana heatmap panel — the direct descendant of the original soft-fail-rate
-figure.
+Each run writes `docs/benchmarks/data/chaos-<timestamp>.csv` with columns
+`delay_ms,oracle_failure_rate`. The one-shot process is intentionally not a
+Prometheus scrape target; a run becomes durable evidence only when its raw CSV
+is reviewed and committed. The name avoids presenting direct-oracle failures
+as relying-party soft-fails.
 
-**Where to expect agreement, and where to expect divergence:** the ground-
-truth oracle profile (`openssl-ocsp-direct`) should reproduce a similar
-transition band, since it uses the same tool as the original run. The other
-six profiles are expected to diverge — that divergence *is* the new data
-this repo adds: different clients (Go stdlib, `curl` without `--cert-status`,
-Python `requests`) don't even attempt the check that would put them in the
-transition band in the first place, so their soft-fail rate is close to
-100% at every delay level, independent of network conditions.
+The experiment is useful for validating the responder fault layer and OCSP
+oracle. Separate digest-pinned client environments and client-specific fault
+paths are required before the project can claim relying-party transition
+thresholds.
 
 ## Operational implication
 
@@ -71,5 +70,5 @@ sufficient. Each mitigation below maps to a concrete feature in this repo:
 |---|---|
 | Prefer short-lived certificates | [ADR-0003](../adr/0003-short-lived-certs-over-revocation.md); 24h leaf TTL, 10m canary TTL |
 | Staple OCSP | `internal/canary/server.go` stapling modes (`on`/`off`/`stale`) |
-| Hard-fail on high-risk paths | `go-tls-ocsp` profile's must-staple-style behavior; documented per-profile expectations in `internal/profiles/registry.go` |
+| Hard-fail on high-risk paths | `go-hardfail-ocsp` custom validator; documented scenario contracts in `internal/profiles/registry.go` |
 | Monitor revocation enforcement continuously | The entire Assurance plane — `revocation-probe` running on a schedule, not as a one-off script |

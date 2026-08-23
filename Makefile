@@ -20,12 +20,15 @@ up: env prepare-dev-tls ## Start the core stack
 	@$(MAKE) status
 
 .PHONY: down
-down: ## Stop the core stack
-	docker compose --profile app --profile tools down --remove-orphans
+down: ## Stop core, observability, chaos, and optional Wazuh services
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.wazuh.yml \
+	  --profile app --profile tools --profile chaos --profile wazuh down --remove-orphans
 
 .PHONY: clean
 clean: ## Stop the stack and wipe all local state
-	docker compose --env-file $(COMPOSE_ENV_FILE) --profile app --profile tools down -v --remove-orphans
+	docker compose --env-file $(COMPOSE_ENV_FILE) \
+	  -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.wazuh.yml \
+	  --profile app --profile tools --profile chaos --profile wazuh down -v --remove-orphans
 	rm -rf .data
 	rm -f terraform/bootstrap/terraform.tfstate terraform/bootstrap/terraform.tfstate.backup
 
@@ -87,6 +90,10 @@ demo-api-logs: ## Tail demo-api logs
 demo-revoke: ## Run one probe cycle and pretty-print the detection table
 	./scripts/demo-revoke.sh
 
+.PHONY: attestation-key
+attestation-key: ## Create an ignored Ed25519 keypair for signed local assurance reports
+	./scripts/generate-attestation-key.sh
+
 .PHONY: chaos-sweep
 chaos-sweep: ## Sweep injected OCSP-path latency; writes docs/benchmarks/data/chaos-*.csv
 	./scripts/chaos.sh
@@ -94,7 +101,7 @@ chaos-sweep: ## Sweep injected OCSP-path latency; writes docs/benchmarks/data/ch
 # ── Phase 4: observability & Wazuh ─────────────────────────────────────────
 
 .PHONY: up-full
-up-full: env prepare-dev-tls ## Start core + observability (Prometheus/Grafana/Alertmanager)
+up-full: env prepare-dev-tls truststore-baseline ## Start core + observability (Prometheus/Grafana/Alertmanager)
 	./scripts/gen-slack-url-file.sh
 	docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile app up -d
 	@$(MAKE) status
@@ -105,9 +112,21 @@ up-wazuh: env prepare-dev-tls ## Start core + observability + Wazuh (profile: wa
 	docker compose -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.wazuh.yml --profile app --profile wazuh up -d
 	@$(MAKE) status
 
+.PHONY: wazuh-logtest
+wazuh-logtest: env ## Validate the revocation audit fixture against Wazuh rule 100101
+	./scripts/wazuh-logtest.sh
+
 .PHONY: truststore-drift-demo
 truststore-drift-demo: ## Install a synthetic rogue CA on the host and show truststore-drift-agent detect it
 	./scripts/truststore-drift-demo.sh
+
+.PHONY: truststore-baseline
+truststore-baseline: ## Create a demo signed trust policy for the Prometheus exporter
+	@mkdir -p .data/truststore/extra-cas .data/truststore/published .data/truststore/signer
+	docker compose run --rm -T truststore-drift-agent baseline \
+	  -o /data/published/baseline.json \
+	  --private-key /data/signer/baseline.key \
+	  --public-key /data/published/baseline.pub
 
 # ── Phase 5: CI / supply chain ─────────────────────────────────────────────
 

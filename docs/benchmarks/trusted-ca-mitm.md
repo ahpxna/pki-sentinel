@@ -30,7 +30,7 @@ the function of
 [`truststore-drift-agent`](../../services/truststore-drift-agent/README.md)
 does: hash every root's SubjectPublicKeyInfo and diff against a signed
 baseline. A rogue CA installed after the baseline was taken shows up as an
-`unknown_root` event and a non-zero `pki_truststore_unknown_roots` gauge,
+`UNKNOWN_ROOT_ADDED` event and a non-zero `pki_truststore_unknown_roots` gauge,
 regardless of whether any TLS connection was ever intercepted.
 
 See `make truststore-drift-demo` for a runnable reproduction (installs a

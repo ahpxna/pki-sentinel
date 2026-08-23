@@ -18,7 +18,7 @@ profiles:
   - name: go-tls-default
     enabled: true
     timeout: 5s
-  - name: go-tls-ocsp
+  - name: go-hardfail-ocsp
     enabled: true
     timeout: 5s
   - name: python-requests

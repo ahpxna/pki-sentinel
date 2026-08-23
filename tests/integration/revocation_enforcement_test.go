@@ -24,11 +24,16 @@ import (
 )
 
 type result struct {
-	Profile      string `json:"profile"`
-	Method       string `json:"method"`
-	Outcome      string `json:"outcome"`
-	DetectionDur int64  `json:"detection_duration_ns"`
-	Error        string `json:"error"`
+	Profile          string   `json:"profile"`
+	Role             string   `json:"role"`
+	Method           string   `json:"method"`
+	Decision         string   `json:"decision"`
+	Reason           string   `json:"reason"`
+	ExpectedDecision string   `json:"expected_decision"`
+	ExpectedReasons  []string `json:"expected_reasons"`
+	ExpectationMet   bool     `json:"expectation_met"`
+	DecisionLatency  int64    `json:"decision_latency_ns"`
+	Error            string   `json:"error"`
 }
 
 type cycleReport struct {
@@ -87,11 +92,9 @@ func findResult(t *testing.T, report cycleReport, profile string) result {
 }
 
 // TestRevocationEnforcement is the headline assertion: the ground-truth
-// oracle (openssl-ocsp-direct) must detect revocation quickly, stapled
-// clients must reject, and clients that perform no revocation check at all
-// are expected — and asserted — to accept. That last assertion is not a
-// defect being tolerated; it's the documented property this entire project
-// exists to surface (see README "Rationale").
+// status oracle must confirm REVOKED quickly, then every client executor must
+// satisfy its explicit scenario contract. Decision and reason are asserted
+// separately so a network or TLS failure cannot masquerade as enforcement.
 func TestRevocationEnforcement(t *testing.T) {
 	report := runProbeOnce(t)
 	if report.CycleID == "" || len(report.Results) == 0 {
@@ -99,26 +102,30 @@ func TestRevocationEnforcement(t *testing.T) {
 	}
 
 	oracle := findResult(t, report, "openssl-ocsp-direct")
-	if oracle.Outcome != "rejected" {
-		t.Errorf("openssl-ocsp-direct: expected rejected, got %s — the PKI itself may be misconfigured", oracle.Outcome)
+	if oracle.Role != "status_oracle" || oracle.Decision != "REJECT" || oracle.Reason != "REVOKED" {
+		t.Errorf("openssl-ocsp-direct: expected status_oracle REJECT/REVOKED, got role=%s decision=%s reason=%s", oracle.Role, oracle.Decision, oracle.Reason)
 	}
-	if time.Duration(oracle.DetectionDur) >= 15*time.Second {
-		t.Errorf("openssl-ocsp-direct: detection took %s, expected < 15s — the ground-truth oracle should be fast", time.Duration(oracle.DetectionDur))
+	if time.Duration(oracle.DecisionLatency) >= 15*time.Second {
+		t.Errorf("openssl-ocsp-direct: decision took %s, expected < 15s", time.Duration(oracle.DecisionLatency))
 	}
 
 	for _, r := range report.Results {
-		if r.Error != "" || r.Outcome == "error" {
+		if r.Error != "" || r.Decision == "HARNESS_ERROR" {
 			t.Errorf("%s: harness error: %s", r.Profile, r.Error)
 			continue
 		}
-		if r.Method == "none" {
-			// Expected property, not a defect: these clients perform no
-			// revocation check by default, so they accept.
-			if r.Outcome != "accepted" {
-				t.Errorf("%s: expected accepted (documented no-revocation-check behavior), got %s", r.Profile, r.Outcome)
+		if !r.ExpectationMet || r.Decision != r.ExpectedDecision {
+			t.Errorf("%s (%s): decision=%s reason=%s expected=%s", r.Profile, r.Method, r.Decision, r.Reason, r.ExpectedDecision)
+		}
+		reasonAllowed := false
+		for _, expectedReason := range r.ExpectedReasons {
+			if r.Reason == expectedReason {
+				reasonAllowed = true
+				break
 			}
-		} else if r.Outcome != "rejected" {
-			t.Errorf("%s (%s): expected rejected, got %s", r.Profile, r.Method, r.Outcome)
+		}
+		if len(r.ExpectedReasons) > 0 && !reasonAllowed {
+			t.Errorf("%s: reason=%s expected one of %v", r.Profile, r.Reason, r.ExpectedReasons)
 		}
 	}
 }

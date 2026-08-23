@@ -40,7 +40,6 @@ over nonessential Issuance-plane refinements when scope must be reduced.
   own Prometheus metrics, its own Grafana dashboard, its own Dockerfile
   deviating from the distroless norm — see ADR-0006) than a PKI-only repository
   would need.
-- The chaos-sweep feature (Step 3.7) exists specifically so the original
-  one-off soft-fail measurement becomes a repeatable, versioned artifact
-  (`docs/benchmarks/data/chaos-*.csv`) rather than a non-reproducible
-  historical claim.
+- The chaos sweep preserves the experimental discipline as a repeatable,
+  versioned CSV artifact, but its current direct-oracle results are kept
+  distinct from the prior client soft-fail measurements.

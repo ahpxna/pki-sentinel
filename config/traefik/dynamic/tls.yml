@@ -8,11 +8,22 @@ http:
       entryPoints: [websecure]
       service: vault-acme
       tls: {}
+    demo-api:
+      rule: Host(`api.internal`)
+      entryPoints: [websecure]
+      service: demo-api
+      middlewares: [secure-headers]
+      tls:
+        certResolver: internal
   services:
     vault-acme:
       loadBalancer:
         servers:
           - url: http://vault:8200
+    demo-api:
+      loadBalancer:
+        servers:
+          - url: http://demo-api:8000
   middlewares:
     secure-headers:
       headers:

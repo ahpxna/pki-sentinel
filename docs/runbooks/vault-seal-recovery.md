@@ -30,7 +30,7 @@ or revoked while Vault is sealed.
    ```bash
    docker compose restart vault-seal
    source scripts/lib/wait_for.sh
-   wait_for_http "http://localhost:${VAULT_SEAL_PORT:-8210}/v1/sys/health" 60
+   wait_for_cmd 60 docker compose exec -T vault-seal vault status
    docker compose restart vault
    ```
 

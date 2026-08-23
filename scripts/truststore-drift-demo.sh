@@ -9,7 +9,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-mkdir -p .data/truststore/extra-cas
+mkdir -p .data/truststore/extra-cas .data/truststore/published .data/truststore/signer
 dc() { docker compose run --rm -T truststore-drift-agent "$@"; }
 
 echo "[truststore-drift-demo] seeding a known-good CA in the isolated demo store..."
@@ -19,8 +19,8 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -keyout .data/truststore/baseline-ca.key 2>/dev/null
 
 echo "[truststore-drift-demo] 1/3 baselining the demo trust store..."
-dc baseline -o /data/baseline.json \
-  --private-key /data/baseline.key --public-key /data/baseline.pub
+dc baseline -o /data/published/baseline.json \
+  --private-key /data/signer/baseline.key --public-key /data/published/baseline.pub
 
 echo "[truststore-drift-demo] 2/3 installing a synthetic rogue CA..."
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
@@ -29,7 +29,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
 
 echo "[truststore-drift-demo] 3/3 checking for drift (expect exit=1, event mentions 'Rogue MITM CA')..."
 set +e
-output="$(dc check -b /data/baseline.json --public-key /data/baseline.pub \
+output="$(dc check -b /data/published/baseline.json --public-key /data/published/baseline.pub \
   --log /data/truststore.json 2>&1)"
 status=$?
 set -e

@@ -3,6 +3,13 @@ resource "vault_mount" "pki_int" {
   type                  = "pki"
   description           = "Issuing CA. Signs server/client/canary leaf certificates."
   max_lease_ttl_seconds = var.int_ttl_hours * 3600
+  allowed_response_headers = [
+    "Last-Modified",
+    "Location",
+    "Replay-Nonce",
+    "Link",
+  ]
+  passthrough_request_headers = ["If-Modified-Since"]
 }
 
 resource "vault_pki_secret_backend_intermediate_cert_request" "int" {

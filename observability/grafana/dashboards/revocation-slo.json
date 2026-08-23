@@ -55,21 +55,15 @@
     {
       "id": 3,
       "type": "table",
-      "title": "Profile x Method x Last Outcome — client revocation enforcement",
+      "title": "Assurance Matrix — role x client x scenario x decision x reason",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "pki_revocation_detected_total",
+          "expr": "sum by (role, profile, method, scenario, decision, reason) (pki_assurance_observations_total)",
           "format": "table",
           "instant": true,
           "refId": "A"
-        },
-        {
-          "expr": "pki_revocation_softfail_total",
-          "format": "table",
-          "instant": true,
-          "refId": "B"
         }
       ]
     },
@@ -83,21 +77,6 @@
         {
           "expr": "histogram_quantile(0.95, rate(pki_ocsp_responder_latency_seconds_bucket[5m]))",
           "legendFormat": "p95",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 5,
-      "type": "heatmap",
-      "title": "Soft-fail rate vs injected OCSP-path delay (chaos sweep)",
-      "description": "Direct descendant of the CYB 260 soft-fail-rate figure. See docs/benchmarks/ocsp-softfail-thresholds.md.",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "expr": "pki_chaos_softfail_rate",
-          "legendFormat": "{{delay_ms}}ms",
           "refId": "A"
         }
       ]

@@ -1,7 +1,7 @@
 // Command probe is the revocation-probe CLI: `run` executes cycles on a
 // schedule (or once, with --once), `check` runs a single profile standalone
-// against an arbitrary target, and `chaos` sweeps injected OCSP-path
-// latency and records the soft-fail rate at each level.
+// against an arbitrary target, and `chaos` sweeps responder-scoped latency
+// while recording direct-OCSP oracle failure rates.
 package main
 
 import (
@@ -10,16 +10,21 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/attestation"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/canary"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/chaos"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/config"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/executor"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/issuer"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/metrics"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
@@ -39,6 +44,10 @@ func main() {
 		cmdCheck(os.Args[2:])
 	case "chaos":
 		cmdChaos(os.Args[2:])
+	case "attest":
+		cmdAttest(os.Args[2:])
+	case "executor":
+		cmdExecutor(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -51,8 +60,10 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
   probe run   [--once] [--config profiles.yaml] [--output json]
-  probe check --profile <name> --target <https://host:port> --ca <chain.pem>
-  probe chaos sweep [--delays 0,1000,2000] [--trials 5] [--out path.csv]`)
+  probe check --profile <name> --target <https://host:port> --ca <chain.pem> [--ocsp-url URL] [--crl-url URL]
+  probe chaos sweep [--delays 0,1000,2000] [--trials 5] [--out path.csv]
+  probe attest verify --public-key attestation.pub --input cycle.attestation.json
+  probe executor --profile <name> [--listen :8120]`)
 }
 
 func env(key, def string) string {
@@ -72,7 +83,20 @@ func cmdRun(args []string) {
 	interval := fs.Duration("interval", 15*time.Minute, "cycle interval when not --once")
 	stapling := fs.String("stapling", "on", "OCSP stapling mode: on|off|stale")
 	metricsAddr := fs.String("metrics-addr", ":9110", "address to serve /metrics, /healthz, /readyz")
+	attestationKey := fs.String("attestation-key", env("ASSURANCE_ATTESTATION_KEY", ""), "Ed25519 PKCS#8 private-key PEM used to sign each cycle report")
+	attestationOut := fs.String("attestation-out", env("ASSURANCE_ATTESTATION_OUT", ""), "attestation envelope JSON path (requires --attestation-key)")
 	_ = fs.Parse(args)
+	if (*attestationKey == "") != (*attestationOut == "") {
+		log.Fatal("probe run: --attestation-key and --attestation-out must be supplied together")
+	}
+	var attestationPrivateKey []byte
+	if *attestationKey != "" {
+		var err error
+		attestationPrivateKey, err = attestation.ReadPrivateKey(*attestationKey)
+		if err != nil {
+			log.Fatalf("probe run: %v", err)
+		}
+	}
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -101,25 +125,39 @@ func cmdRun(args []string) {
 		log.Fatalf("probe run: vault login: %v", err)
 	}
 
+	profileURLs, err := executor.ParseURLs(env("PROBE_EXECUTORS", ""))
+	if err != nil {
+		log.Fatalf("probe run: %v", err)
+	}
+	profileRegistry, err := executor.ApplyRemote(profiles.Registry(), profileURLs)
+	if err != nil {
+		log.Fatalf("probe run: %v", err)
+	}
 	r := &runner.Runner{
 		Issuer:   issuerClient,
 		Config:   cfg,
-		Profiles: profiles.Registry(),
+		Profiles: profileRegistry,
 		Stapling: canary.StaplingMode(*stapling),
 		OCSPURL:  vaultPublicAddr + "/v1/pki_int/ocsp",
 		// The demo enables Vault delta CRLs with a one-minute rebuild
 		// interval; the full CRL is intentionally long-lived (72h).
-		CRLURL: vaultPublicAddr + "/v1/pki_int/crl/delta",
-		Domain: domain,
+		CRLURL:            vaultPublicAddr + "/v1/pki_int/crl/delta",
+		Domain:            domain,
+		CanaryBindHost:    env("PROBE_CANARY_BIND_HOST", ""),
+		CanaryConnectHost: env("PROBE_CANARY_CONNECT_HOST", ""),
 	}
 
 	runCycle := func() error {
 		report, err := r.RunOnce(ctx)
-		if err != nil {
-			return err
+		if report != nil {
+			if len(attestationPrivateKey) > 0 {
+				if signErr := writeAttestation(*attestationOut, attestationPrivateKey, report); signErr != nil {
+					return fmt.Errorf("write assurance attestation: %w", signErr)
+				}
+			}
+			printReport(report, *output)
 		}
-		printReport(report, *output)
-		return nil
+		return err
 	}
 
 	if *once {
@@ -146,6 +184,38 @@ func cmdRun(args []string) {
 	}
 }
 
+func writeAttestation(path string, privateKey []byte, report *runner.CycleReport) error {
+	envelope, err := attestation.Sign(privateKey, report, time.Now())
+	if err != nil {
+		return err
+	}
+	contents, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode envelope: %w", err)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".assurance-attestation-*")
+	if err != nil {
+		return fmt.Errorf("create temporary attestation: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return fmt.Errorf("set temporary attestation permissions: %w", err)
+	}
+	if _, err := temporary.Write(append(contents, '\n')); err != nil {
+		temporary.Close()
+		return fmt.Errorf("write temporary attestation: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close temporary attestation: %w", err)
+	}
+	if err := os.Rename(temporaryName, path); err != nil {
+		return fmt.Errorf("replace attestation: %w", err)
+	}
+	return nil
+}
+
 func printReport(report *runner.CycleReport, format string) {
 	if format == "json" {
 		enc := json.NewEncoder(os.Stdout)
@@ -153,14 +223,11 @@ func printReport(report *runner.CycleReport, format string) {
 		_ = enc.Encode(report)
 		return
 	}
-	fmt.Printf("cycle %s  revoked_at=%s\n", report.CycleID, report.RevokedAt.Format(time.RFC3339))
-	fmt.Printf("%-22s %-14s %-10s %-10s %s\n", "PROFILE", "METHOD", "OUTCOME", "ATTEMPTS", "DETECTION")
+	fmt.Printf("cycle %s  scenario=%s  revoke_ack_at=%s\n", report.CycleID, report.Scenario, report.RevokeAckAt.Format(time.RFC3339))
+	fmt.Printf("%-22s %-16s %-14s %-18s %-20s %-8s %s\n", "PROFILE", "ROLE", "METHOD", "DECISION", "REASON", "MATCH", "LATENCY")
 	for _, res := range report.Results {
-		det := "-"
-		if res.Outcome == profiles.OutcomeRejected {
-			det = res.DetectionDur.Round(time.Millisecond).String()
-		}
-		fmt.Printf("%-22s %-14s %-10s %-10d %s\n", res.Profile, res.Method, res.Outcome, res.Attempts, det)
+		latency := res.DecisionLatency.Round(time.Millisecond).String()
+		fmt.Printf("%-22s %-16s %-14s %-18s %-20s %-8t %s\n", res.Profile, res.Role, res.Method, res.Decision, res.Reason, res.ExpectationMet, latency)
 	}
 }
 
@@ -171,6 +238,8 @@ func cmdCheck(args []string) {
 	profileName := fs.String("profile", "", "profile name, e.g. curl-default")
 	target := fs.String("target", "", "https://host:port")
 	caPath := fs.String("ca", "", "path to CA chain PEM")
+	ocspURL := fs.String("ocsp-url", "", "OCSP responder URL required by direct OCSP profiles")
+	crlURL := fs.String("crl-url", "", "CRL URL required by CRL profiles")
 	_ = fs.Parse(args)
 
 	if *profileName == "" || *target == "" || *caPath == "" {
@@ -203,27 +272,89 @@ func cmdCheck(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	t := profiles.Target{Host: host, Port: port, CAChainPEM: string(caPEM), IssuerPEM: string(caPEM)}
-	outcome, err := found.Probe(ctx, t)
+	if found.Method == profiles.MethodOCSPDirect && *ocspURL == "" {
+		log.Fatal("check: --ocsp-url is required for an OCSP-direct profile")
+	}
+	if found.Method == profiles.MethodCRL && *crlURL == "" {
+		log.Fatal("check: --crl-url is required for a CRL profile")
+	}
+	t := profiles.Target{
+		Host: host, Port: port, CAChainPEM: string(caPEM), IssuerPEM: string(caPEM),
+		OCSPURL: *ocspURL, CRLURL: *crlURL, Scenario: profiles.ScenarioRevokedStaple,
+	}
+	observation, err := found.Probe(ctx, t)
 	if err != nil {
-		fmt.Printf("outcome=error err=%v\n", err)
+		fmt.Printf("decision=%s reason=%s err=%v\n", profiles.DecisionHarnessError, profiles.ReasonHarnessFailure, err)
 		os.Exit(1)
 	}
-	fmt.Printf("outcome=%s\n", outcome)
+	fmt.Printf("decision=%s reason=%s\n", observation.Decision, observation.Reason)
+}
+
+// --- attest ---------------------------------------------------------------
+
+func cmdAttest(args []string) {
+	if len(args) == 0 || args[0] != "verify" {
+		fmt.Fprintln(os.Stderr, "usage: probe attest verify --public-key attestation.pub --input cycle.attestation.json")
+		os.Exit(2)
+	}
+	fs := flag.NewFlagSet("attest verify", flag.ExitOnError)
+	publicKeyPath := fs.String("public-key", "", "Ed25519 PKIX public-key PEM")
+	inputPath := fs.String("input", "", "attestation envelope JSON")
+	_ = fs.Parse(args[1:])
+	if *publicKeyPath == "" || *inputPath == "" {
+		log.Fatal("attest verify: --public-key and --input are required")
+	}
+	publicKey, err := os.ReadFile(*publicKeyPath)
+	if err != nil {
+		log.Fatalf("attest verify: reading public key: %v", err)
+	}
+	envelope, err := attestation.ReadEnvelope(*inputPath)
+	if err != nil {
+		log.Fatalf("attest verify: %v", err)
+	}
+	if err := attestation.Verify(publicKey, envelope); err != nil {
+		log.Fatalf("attest verify: %v", err)
+	}
+	fmt.Printf("verified %s issued_at=%s payload_sha256=%s\n", envelope.Version, envelope.IssuedAt.Format(time.RFC3339), envelope.PayloadSHA256)
+}
+
+// --- executor -------------------------------------------------------------
+
+func cmdExecutor(args []string) {
+	fs := flag.NewFlagSet("executor", flag.ExitOnError)
+	profileName := fs.String("profile", "", "single profile to execute")
+	listen := fs.String("listen", ":8120", "internal HTTP listen address")
+	_ = fs.Parse(args)
+	if *profileName == "" {
+		log.Fatal("executor: --profile is required")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := executor.Serve(ctx, *listen, *profileName); err != nil {
+		log.Fatalf("executor: %v", err)
+	}
 }
 
 func splitHostPort(target string) (string, int, error) {
-	t := strings.TrimPrefix(target, "https://")
-	t = strings.TrimSuffix(t, "/")
-	parts := strings.SplitN(t, ":", 2)
-	if len(parts) != 2 {
-		return "", 0, fmt.Errorf("expected host:port, got %q", target)
-	}
-	port, err := strconv.Atoi(parts[1])
+	parsed, err := url.Parse(target)
 	if err != nil {
-		return "", 0, fmt.Errorf("invalid port %q: %w", parts[1], err)
+		return "", 0, fmt.Errorf("parsing URL: %w", err)
 	}
-	return parts[0], port, nil
+	if parsed.Scheme != "https" || parsed.Host == "" || parsed.Path != "" && parsed.Path != "/" {
+		return "", 0, fmt.Errorf("expected https://host:port, got %q", target)
+	}
+	host, portText, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		return "", 0, fmt.Errorf("expected explicit host:port in %q: %w", target, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid port %q: %w", portText, err)
+	}
+	if port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("port %d out of range", port)
+	}
+	return host, port, nil
 }
 
 // --- chaos ---------------------------------------------------------------
@@ -237,8 +368,10 @@ func cmdChaos(args []string) {
 	delaysFlag := fs.String("delays", "", "comma-separated delay list in ms (default: dense sweep near 2s)")
 	trials := fs.Int("trials", 5, "trials per delay level")
 	out := fs.String("out", "", "output CSV path (default: docs/benchmarks/data/chaos-<timestamp>.csv)")
-	iface := fs.String("iface", "eth0", "network interface to apply netem to")
 	_ = fs.Parse(args[1:])
+	if *trials < 1 {
+		log.Fatal("chaos sweep: --trials must be at least 1")
+	}
 
 	delays := chaos.DefaultDelaysMS
 	if *delaysFlag != "" {
@@ -265,6 +398,18 @@ func cmdChaos(args []string) {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	const ocspPath = "/v1/pki_int/ocsp"
+	faultProxy, err := chaos.StartLatencyProxy(vaultPublicAddr, ocspPath)
+	if err != nil {
+		log.Fatalf("chaos sweep: starting responder fault proxy: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := faultProxy.Close(shutdownCtx); err != nil {
+			log.Printf("chaos sweep: closing responder fault proxy: %v", err)
+		}
+	}()
 
 	issuerClient, err := issuer.Login(ctx, vaultAddr, roleID, secretID)
 	if err != nil {
@@ -282,31 +427,25 @@ func cmdChaos(args []string) {
 		Config:   cfg,
 		Profiles: profiles.Registry(),
 		Stapling: canary.StaplingOff,
-		OCSPURL:  vaultPublicAddr + "/v1/pki_int/ocsp",
+		OCSPURL:  faultProxy.URL() + ocspPath,
 		CRLURL:   vaultPublicAddr + "/v1/pki_int/crl/delta",
 		Domain:   domain,
 	}
 
-	results, err := chaos.Sweep(ctx, *iface, delays, *trials, func(trialCtx context.Context, delayMS int) (bool, error) {
+	results, err := chaos.Sweep(ctx, faultProxy, delays, *trials, func(trialCtx context.Context, delayMS int) (bool, error) {
 		report, err := r.RunOnce(trialCtx)
 		if err != nil {
 			return false, err
 		}
 		for _, res := range report.Results {
 			if res.Profile == "openssl-ocsp-direct" {
-				return res.Outcome != profiles.OutcomeRejected, nil
+				return res.Decision != profiles.DecisionReject, nil
 			}
 		}
 		return false, fmt.Errorf("openssl-ocsp-direct result missing from cycle report")
 	})
 	if err != nil {
 		log.Printf("chaos sweep: %v", err)
-	}
-
-	for _, d := range delays {
-		if rate, ok := results[d]; ok {
-			metrics.ChaosSoftfailRate.WithLabelValues(strconv.Itoa(d)).Set(rate)
-		}
 	}
 
 	if err := chaos.WriteCSV(outPath, delays, results); err != nil {

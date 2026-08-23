@@ -1,6 +1,7 @@
-// Package profiles defines the core domain model shared across the
-// revocation-probe: outcomes, check methods, profile definitions, and
-// per-cycle results.
+// Package profiles defines the assurance domain model shared by the
+// revocation probe. A decision records what a relying party did; a reason
+// records why the harness believes it made that decision. Status oracles are
+// explicitly separated from client executors.
 package profiles
 
 import (
@@ -8,16 +9,42 @@ import (
 	"time"
 )
 
-// Outcome is the result of a single client profile's revocation check.
-type Outcome string
+// Role identifies whether an executor observes CA status directly or behaves
+// as a relying-party TLS client.
+type Role string
 
 const (
-	// OutcomeRejected means the client correctly refused the revoked cert.
-	OutcomeRejected Outcome = "rejected"
-	// OutcomeAccepted means the client soft-failed: it used a revoked cert.
-	OutcomeAccepted Outcome = "accepted"
-	// OutcomeError means the harness itself failed. Not a security signal.
-	OutcomeError Outcome = "error"
+	RoleStatusOracle   Role = "status_oracle"
+	RoleClientExecutor Role = "client_executor"
+)
+
+// Decision is the normalized outcome of an assurance observation.
+type Decision string
+
+const (
+	DecisionAccept       Decision = "ACCEPT"
+	DecisionReject       Decision = "REJECT"
+	DecisionInconclusive Decision = "INCONCLUSIVE"
+	DecisionHarnessError Decision = "HARNESS_ERROR"
+)
+
+// Reason explains a decision without conflating revocation enforcement with
+// unrelated network, TLS, or harness failures.
+type Reason string
+
+const (
+	ReasonStatusGood        Reason = "STATUS_GOOD"
+	ReasonRevoked           Reason = "REVOKED"
+	ReasonExpired           Reason = "EXPIRED"
+	ReasonMissingStatus     Reason = "MISSING_STATUS"
+	ReasonInvalidStatus     Reason = "INVALID_STATUS"
+	ReasonStaleStatus       Reason = "STALE_STATUS"
+	ReasonUnknownStatus     Reason = "UNKNOWN_STATUS"
+	ReasonNoRevocationCheck Reason = "NO_REVOCATION_CHECK"
+	ReasonNetworkFailure    Reason = "NETWORK_FAILURE"
+	ReasonTLSFailure        Reason = "TLS_FAILURE"
+	ReasonClientPolicy      Reason = "CLIENT_POLICY"
+	ReasonHarnessFailure    Reason = "HARNESS_FAILURE"
 )
 
 // CheckMethod describes how (if at all) a profile verifies revocation status.
@@ -27,42 +54,118 @@ const (
 	MethodOCSPDirect  CheckMethod = "ocsp_direct"  // query the responder directly, no TLS
 	MethodOCSPStapled CheckMethod = "ocsp_stapled" // must-staple / stapled response
 	MethodCRL         CheckMethod = "crl"
-	MethodNone        CheckMethod = "none" // client performs no revocation check
+	MethodNone        CheckMethod = "none"
+)
+
+// Scenario identifies a stable assurance experiment. Values are bounded so
+// they are safe to use as Prometheus labels.
+type Scenario string
+
+const (
+	ScenarioRevokedStaple    Scenario = "revoked_staple"
+	ScenarioMissingStaple    Scenario = "missing_staple"
+	ScenarioCachedGoodStaple Scenario = "cached_good_staple"
 )
 
 // Target describes the ephemeral canary TLS endpoint a profile should probe.
 type Target struct {
-	Host       string // SNI hostname, e.g. canary-<uuid>.canary.internal
-	Port       int
-	CAChainPEM string // PEM bundle: issuing CA + root CA
-	IssuerPEM  string // issuing CA used to validate OCSP responses
-	OCSPURL    string
-	CRLURL     string
+	Host string // SNI hostname, e.g. canary-<uuid>.canary.internal
+	// ConnectHost is the network address used to reach Host. It is empty for
+	// local execution (127.0.0.1) and names the probe service when a profile
+	// runs in an isolated client-executor container.
+	ConnectHost       string
+	Port              int
+	CAChainPEM        string // PEM bundle: issuing CA + root CA
+	IssuerPEM         string // issuing CA used to validate OCSP responses
+	OCSPURL           string
+	CRLURL            string
+	CertificateSerial string
+	Scenario          Scenario
 }
 
-// Profile is a single client-behavior probe.
+// CommandEvidence preserves enough subprocess evidence for independent
+// diagnosis without putting unbounded certificate identifiers into metrics.
+type CommandEvidence struct {
+	Client        string `json:"client,omitempty"`
+	Executor      string `json:"executor,omitempty"`
+	ClientVersion string `json:"client_version,omitempty"`
+	TLSBackend    string `json:"tls_backend,omitempty"`
+	ExitCode      *int   `json:"exit_code,omitempty"`
+	StdoutSHA256  string `json:"stdout_sha256,omitempty"`
+	StderrSHA256  string `json:"stderr_sha256,omitempty"`
+}
+
+// Observation is returned by one oracle or client execution attempt.
+type Observation struct {
+	Decision Decision        `json:"decision"`
+	Reason   Reason          `json:"reason"`
+	Evidence CommandEvidence `json:"evidence,omitempty"`
+}
+
+// Expectation defines the decision a profile should produce before and after
+// revocation for a scenario. It is used both as a pre-flight invariant and as
+// a security-regression assertion.
+type Expectation struct {
+	Before        Decision
+	BeforeReasons []Reason
+	After         Decision
+	AfterReasons  []Reason
+}
+
+func reasonAllowed(reason Reason, allowed []Reason) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, candidate := range allowed {
+		if reason == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchesBefore and MatchesAfter validate both dimensions of a scenario
+// contract. An empty reason list is reserved for synthetic unit-test profiles.
+func (e Expectation) MatchesBefore(observation Observation) bool {
+	return observation.Decision == e.Before && reasonAllowed(observation.Reason, e.BeforeReasons)
+}
+
+func (e Expectation) MatchesAfter(observation Observation) bool {
+	return observation.Decision == e.After && reasonAllowed(observation.Reason, e.AfterReasons)
+}
+
+// Profile is one status oracle or relying-party client executor.
 type Profile struct {
-	Name        string
-	Method      CheckMethod
-	Description string
-	// Expected is the baseline outcome documented in profiles.yaml / the
-	// Phase 3 client-profile table; used by tests and the pre-flight guard.
-	Expected string
-
-	// Probe returns whether the client rejected the connection to Target.
-	// A nil error with OutcomeAccepted/OutcomeRejected is the normal path;
-	// a non-nil error always implies OutcomeError.
-	Probe func(ctx context.Context, target Target) (Outcome, error)
+	Name         string
+	Role         Role
+	Method       CheckMethod
+	Description  string
+	Expectations map[Scenario]Expectation
+	Probe        func(ctx context.Context, target Target) (Observation, error)
 }
 
-// Result is the outcome of a single profile within a single probe cycle.
+// Expected returns the scenario-specific contract for this profile.
+func (p Profile) Expected(scenario Scenario) (Expectation, bool) {
+	expectation, ok := p.Expectations[scenario]
+	return expectation, ok
+}
+
+// Result is the durable evidence record for one profile in one cycle.
 type Result struct {
-	Profile      string        `json:"profile"`
-	Method       CheckMethod   `json:"method"`
-	Outcome      Outcome       `json:"outcome"`
-	RevokedAt    time.Time     `json:"revoked_at"`
-	DetectedAt   time.Time     `json:"detected_at,omitempty"`
-	DetectionDur time.Duration `json:"detection_duration_ns,omitempty"`
-	Attempts     int           `json:"attempts"`
-	Err          string        `json:"error,omitempty"`
+	Profile           string          `json:"profile"`
+	Role              Role            `json:"role"`
+	Method            CheckMethod     `json:"method"`
+	Scenario          Scenario        `json:"scenario"`
+	Decision          Decision        `json:"decision"`
+	Reason            Reason          `json:"reason"`
+	ExpectedDecision  Decision        `json:"expected_decision"`
+	ExpectedReasons   []Reason        `json:"expected_reasons,omitempty"`
+	ExpectationMet    bool            `json:"expectation_met"`
+	CertificateSerial string          `json:"certificate_serial"`
+	RevokeAckAt       time.Time       `json:"revoke_ack_at"`
+	DecisionAt        time.Time       `json:"decision_at,omitempty"`
+	DecisionLatency   time.Duration   `json:"decision_latency_ns,omitempty"`
+	Attempts          int             `json:"attempts"`
+	Evidence          CommandEvidence `json:"evidence,omitempty"`
+	Err               string          `json:"error,omitempty"`
 }

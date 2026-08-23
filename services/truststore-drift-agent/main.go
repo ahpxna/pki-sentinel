@@ -21,11 +21,13 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -52,6 +54,21 @@ type DriftEvent struct {
 	SPKIHash  string    `json:"spki_sha256"`
 }
 
+// ScanResult is the bounded state exported to Prometheus. Detailed root
+// identities remain in the event stream rather than metric labels.
+type ScanResult struct {
+	UnknownRoots  int          `json:"unknown_roots"`
+	MissingRoots  int          `json:"missing_roots"`
+	ChangedRoots  int          `json:"changed_roots"`
+	ExpiredRoots  int          `json:"expired_roots"`
+	ExpiringRoots int          `json:"expiring_roots"`
+	BaselineValid bool         `json:"baseline_valid"`
+	ScanSuccess   bool         `json:"scan_success"`
+	LastScan      time.Time    `json:"last_scan"`
+	Events        []DriftEvent `json:"events,omitempty"`
+	Error         string       `json:"error,omitempty"`
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -62,6 +79,8 @@ func main() {
 		cmdBaseline(os.Args[2:])
 	case "check":
 		cmdCheck(os.Args[2:])
+	case "serve":
+		cmdServe(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -71,7 +90,8 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
   truststore-drift-agent baseline -o <baseline.json> [--private-key key.pem] [--public-key key.pub.pem] [--extra-ca-dir path]
-  truststore-drift-agent check -b <baseline.json> [--public-key key.pub.pem] [--extra-ca-dir path] [--log /var/log/pki-sentinel/truststore.json]`)
+  truststore-drift-agent check -b <baseline.json> [--public-key key.pub.pem] [--extra-ca-dir path] [--log /var/log/pki-sentinel/truststore.json]
+  truststore-drift-agent serve -b <baseline.json> [--public-key key.pub.pem] [--extra-ca-dir path] [--listen :9120] [--interval 60s]`)
 }
 
 func cmdBaseline(args []string) {
@@ -124,66 +144,227 @@ func cmdCheck(args []string) {
 	publicKeyPath := parseFlag(args, "--public-key", baselinePath+".pub")
 	extraCADir := parseFlag(args, "--extra-ca-dir", "/usr/local/share/ca-certificates")
 	logPath := parseFlag(args, "--log", "/var/log/pki-sentinel/truststore.json")
-
-	// #nosec G703 -- reading an operator-selected baseline path is intentional.
-	data, err := os.ReadFile(baselinePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "check: reading baseline: %v\n", err)
-		os.Exit(1)
-	}
-	var baseline Baseline
-	if err := json.Unmarshal(data, &baseline); err != nil {
-		fmt.Fprintf(os.Stderr, "check: parsing baseline: %v\n", err)
-		os.Exit(1)
-	}
-	publicKey, err := loadPublicKey(publicKeyPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "check: loading public key: %v\n", err)
-		os.Exit(1)
-	}
-	if err := verifyBaseline(baseline, publicKey); err != nil {
-		fmt.Fprintf(os.Stderr, "check: baseline signature verification failed: %v\n", err)
-		os.Exit(1)
-	}
-	known := make(map[string]bool, len(baseline.Roots))
-	for _, r := range baseline.Roots {
-		known[r.SPKIHash] = true
-	}
-
-	certs, err := loadTrustStore(extraCADir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "check: %v\n", err)
-		os.Exit(1)
-	}
-
-	unknownCount := 0
-	var events []DriftEvent
-	for _, c := range certs {
-		hash := spkiHash(c)
-		if known[hash] {
-			continue
-		}
-		unknownCount++
-		ev := DriftEvent{
-			Timestamp: time.Now().UTC(),
-			Event:     "unknown_root",
-			Subject:   c.Subject.String(),
-			SPKIHash:  hash,
-		}
-		events = append(events, ev)
-		line, _ := json.Marshal(ev)
+	result := scanTrustStore(baselinePath, publicKeyPath, extraCADir, time.Now().UTC())
+	for _, event := range result.Events {
+		line, _ := json.Marshal(event)
 		fmt.Println(string(line))
 	}
-
-	fmt.Printf("pki_truststore_unknown_roots %d\n", unknownCount)
-
-	if len(events) > 0 {
-		if err := appendLog(logPath, events); err != nil {
+	fmt.Print(prometheusText(result))
+	if logPath != "" && len(result.Events) > 0 {
+		if err := appendLog(logPath, result.Events); err != nil {
 			fmt.Fprintf(os.Stderr, "check: WARNING: could not write %s: %v\n", logPath, err)
 		}
 	}
+	if !result.BaselineValid || !result.ScanSuccess {
+		fmt.Fprintf(os.Stderr, "check: %s\n", result.Error)
+		os.Exit(2)
+	}
+	if result.UnknownRoots > 0 || result.MissingRoots > 0 || result.ExpiredRoots > 0 {
+		os.Exit(1)
+	}
+}
 
-	if unknownCount > 0 {
+func loadVerifiedBaseline(baselinePath, publicKeyPath string) (Baseline, error) {
+	// #nosec G703 -- reading an operator-selected baseline path is intentional.
+	data, err := os.ReadFile(baselinePath)
+	if err != nil {
+		return Baseline{}, fmt.Errorf("reading baseline: %w", err)
+	}
+	var baseline Baseline
+	if err := json.Unmarshal(data, &baseline); err != nil {
+		return Baseline{}, fmt.Errorf("parsing baseline: %w", err)
+	}
+	publicKey, err := loadPublicKey(publicKeyPath)
+	if err != nil {
+		return Baseline{}, fmt.Errorf("loading public key: %w", err)
+	}
+	if err := verifyBaseline(baseline, publicKey); err != nil {
+		return Baseline{}, fmt.Errorf("baseline signature verification failed: %w", err)
+	}
+	return baseline, nil
+}
+
+func scanTrustStore(baselinePath, publicKeyPath, extraCADir string, now time.Time) ScanResult {
+	result := ScanResult{LastScan: now}
+	baseline, err := loadVerifiedBaseline(baselinePath, publicKeyPath)
+	if err != nil {
+		result.Error = err.Error()
+		result.Events = []DriftEvent{{Timestamp: now, Event: "BASELINE_INVALID"}}
+		return result
+	}
+	result.BaselineValid = true
+	certs, err := loadTrustStore(extraCADir)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	return evaluateTrustStore(baseline, certs, now)
+}
+
+func evaluateTrustStore(baseline Baseline, certs []*x509.Certificate, now time.Time) ScanResult {
+	result := ScanResult{BaselineValid: true, ScanSuccess: true, LastScan: now}
+	knownByHash := make(map[string]RootEntry, len(baseline.Roots))
+	knownBySubject := make(map[string]RootEntry, len(baseline.Roots))
+	observedByHash := make(map[string]*x509.Certificate, len(certs))
+	for _, root := range baseline.Roots {
+		knownByHash[root.SPKIHash] = root
+		knownBySubject[root.Subject] = root
+	}
+	for _, cert := range certs {
+		observedByHash[spkiHash(cert)] = cert
+	}
+
+	for _, c := range certs {
+		hash := spkiHash(c)
+		subject := c.Subject.String()
+		if _, known := knownByHash[hash]; !known {
+			result.UnknownRoots++
+			eventType := "UNKNOWN_ROOT_ADDED"
+			if _, sameSubject := knownBySubject[subject]; sameSubject {
+				result.ChangedRoots++
+				eventType = "ROOT_CHANGED"
+			}
+			result.Events = append(result.Events, DriftEvent{
+				Timestamp: now, Event: eventType, Subject: subject, SPKIHash: hash,
+			})
+		}
+		if now.After(c.NotAfter) {
+			result.ExpiredRoots++
+			result.Events = append(result.Events, DriftEvent{
+				Timestamp: now, Event: "ROOT_EXPIRED", Subject: subject, SPKIHash: hash,
+			})
+		} else if c.NotAfter.Before(now.Add(30 * 24 * time.Hour)) {
+			result.ExpiringRoots++
+			result.Events = append(result.Events, DriftEvent{
+				Timestamp: now, Event: "ROOT_EXPIRING", Subject: subject, SPKIHash: hash,
+			})
+		}
+	}
+	for hash, root := range knownByHash {
+		if _, observed := observedByHash[hash]; observed {
+			continue
+		}
+		result.MissingRoots++
+		result.Events = append(result.Events, DriftEvent{
+			Timestamp: now, Event: "EXPECTED_ROOT_REMOVED", Subject: root.Subject, SPKIHash: root.SPKIHash,
+		})
+	}
+	return result
+}
+
+func prometheusText(result ScanResult) string {
+	boolFloat := func(value bool) int {
+		if value {
+			return 1
+		}
+		return 0
+	}
+	return fmt.Sprintf(`# HELP pki_truststore_unknown_roots Roots present but absent from the signed baseline.
+# TYPE pki_truststore_unknown_roots gauge
+pki_truststore_unknown_roots %d
+# HELP pki_truststore_missing_roots Baseline roots absent from the observed trust store.
+# TYPE pki_truststore_missing_roots gauge
+pki_truststore_missing_roots %d
+# HELP pki_truststore_changed_roots Observed roots whose subject matches a baseline root but whose SPKI differs.
+# TYPE pki_truststore_changed_roots gauge
+pki_truststore_changed_roots %d
+# HELP pki_truststore_expired_roots Expired roots in the observed trust store.
+# TYPE pki_truststore_expired_roots gauge
+pki_truststore_expired_roots %d
+# HELP pki_truststore_expiring_roots Roots expiring within 30 days.
+# TYPE pki_truststore_expiring_roots gauge
+pki_truststore_expiring_roots %d
+# HELP pki_truststore_baseline_valid Whether the baseline signature verified.
+# TYPE pki_truststore_baseline_valid gauge
+pki_truststore_baseline_valid %d
+# HELP pki_truststore_scan_success Whether the trust store was scanned successfully.
+# TYPE pki_truststore_scan_success gauge
+pki_truststore_scan_success %d
+# HELP pki_truststore_last_scan_timestamp_seconds Unix timestamp of the last scan attempt.
+# TYPE pki_truststore_last_scan_timestamp_seconds gauge
+pki_truststore_last_scan_timestamp_seconds %d
+`, result.UnknownRoots, result.MissingRoots, result.ChangedRoots, result.ExpiredRoots,
+		result.ExpiringRoots, boolFloat(result.BaselineValid), boolFloat(result.ScanSuccess), result.LastScan.Unix())
+}
+
+func cmdServe(args []string) {
+	baselinePath := parseFlag(args, "-b", "truststore-baseline.json")
+	publicKeyPath := parseFlag(args, "--public-key", baselinePath+".pub")
+	extraCADir := parseFlag(args, "--extra-ca-dir", "/usr/local/share/ca-certificates")
+	logPath := parseFlag(args, "--log", "/var/log/pki-sentinel/truststore.json")
+	listenAddr := parseFlag(args, "--listen", ":9120")
+	intervalText := parseFlag(args, "--interval", "60s")
+	interval, err := time.ParseDuration(intervalText)
+	if err != nil || interval <= 0 {
+		fmt.Fprintf(os.Stderr, "serve: invalid --interval %q\n", intervalText)
+		os.Exit(2)
+	}
+
+	var mu sync.RWMutex
+	current := ScanResult{LastScan: time.Now().UTC(), Error: "initial scan has not completed"}
+	scan := func() {
+		result := scanTrustStore(baselinePath, publicKeyPath, extraCADir, time.Now().UTC())
+		if logPath != "" && len(result.Events) > 0 {
+			if err := appendLog(logPath, result.Events); err != nil {
+				fmt.Fprintf(os.Stderr, "serve: writing events: %v\n", err)
+			}
+		}
+		mu.Lock()
+		current = result
+		mu.Unlock()
+	}
+	scan()
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			scan()
+		}
+	}()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		mu.RLock()
+		result := current
+		mu.RUnlock()
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = w.Write([]byte(prometheusText(result)))
+	})
+	mux.HandleFunc("/events", func(w http.ResponseWriter, _ *http.Request) {
+		mu.RLock()
+		result := current
+		mu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(result)
+	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		mu.RLock()
+		ready := current.BaselineValid && current.ScanSuccess
+		mu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		if !ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"not_ready"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
+	})
+
+	server := &http.Server{
+		Addr:              listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	fmt.Printf("truststore-drift-agent serving on %s every %s\n", listenAddr, interval)
+	if err := server.ListenAndServe(); err != nil {
+		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
 		os.Exit(1)
 	}
 }

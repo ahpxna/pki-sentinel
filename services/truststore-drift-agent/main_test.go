@@ -6,6 +6,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,5 +68,62 @@ func TestBaselineSignatureRejectsTampering(t *testing.T) {
 	baseline.Roots[0].Subject = "CN=Tampered"
 	if err := verifyBaseline(baseline, publicKey); err == nil {
 		t.Fatal("tampered baseline passed signature verification")
+	}
+}
+
+func testCertificate(t *testing.T, commonName string, notAfter time.Time) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &x509.Certificate{
+		Subject:                 pkix.Name{CommonName: commonName},
+		RawSubjectPublicKeyInfo: spki,
+		NotAfter:                notAfter,
+	}
+}
+
+func TestEvaluateTrustStoreDetectsAllDriftClasses(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	expired := testCertificate(t, "Expected A", now.Add(-time.Hour))
+	expectedB := testCertificate(t, "Expected B", now.Add(365*24*time.Hour))
+	changedB := testCertificate(t, "Expected B", now.Add(7*24*time.Hour))
+	unknown := testCertificate(t, "Unknown C", now.Add(365*24*time.Hour))
+	baseline := Baseline{Roots: []RootEntry{
+		{Subject: expired.Subject.String(), SPKIHash: spkiHash(expired)},
+		{Subject: expectedB.Subject.String(), SPKIHash: spkiHash(expectedB)},
+	}}
+
+	result := evaluateTrustStore(baseline, []*x509.Certificate{expired, changedB, unknown}, now)
+	if result.UnknownRoots != 2 || result.ChangedRoots != 1 || result.MissingRoots != 1 {
+		t.Fatalf("unexpected drift counts: %+v", result)
+	}
+	if result.ExpiredRoots != 1 || result.ExpiringRoots != 1 {
+		t.Fatalf("unexpected expiry counts: %+v", result)
+	}
+	if !result.BaselineValid || !result.ScanSuccess {
+		t.Fatalf("expected valid successful scan: %+v", result)
+	}
+}
+
+func TestPrometheusTextContainsBoundedMetrics(t *testing.T) {
+	text := prometheusText(ScanResult{
+		UnknownRoots: 2, MissingRoots: 1, BaselineValid: true, ScanSuccess: true,
+		LastScan: time.Unix(123, 0),
+	})
+	for _, want := range []string{
+		"pki_truststore_unknown_roots 2",
+		"pki_truststore_missing_roots 1",
+		"pki_truststore_baseline_valid 1",
+		"pki_truststore_last_scan_timestamp_seconds 123",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics output missing %q:\n%s", want, text)
+		}
 	}
 }

@@ -55,7 +55,7 @@
   </rule>
 
   <rule id="100106" level="12">
-    <field name="event">^unknown_root$</field>
+    <field name="event">^UNKNOWN_ROOT_ADDED$</field>
     <description>truststore-drift-agent: unauthorized root CA installed.</description>
     <group>truststore_drift,</group>
   </rule>

@@ -13,6 +13,11 @@ resource "vault_policy" "traefik_acme" {
   policy = file("${path.module}/policies/traefik-acme.hcl")
 }
 
+resource "vault_policy" "terraform_bootstrap" {
+  name   = "pki-sentinel-terraform"
+  policy = file("${path.module}/policies/terraform-bootstrap.hcl")
+}
+
 resource "vault_mount" "kv" {
   path        = "kv"
   type        = "kv-v2"

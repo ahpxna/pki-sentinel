@@ -7,7 +7,10 @@
 # still demonstrates the alert path).
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-mkdir -p "${REPO_ROOT}/.data/alertmanager"
+mkdir -p "${REPO_ROOT}/.data/alertmanager" \
+  "${REPO_ROOT}/.data/truststore/published" \
+  "${REPO_ROOT}/.data/truststore/extra-cas" \
+  "${REPO_ROOT}/.data/truststore/events"
 if [[ -f "${REPO_ROOT}/.env" ]]; then
   set -a
   # shellcheck disable=SC1091

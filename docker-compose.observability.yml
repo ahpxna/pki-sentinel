@@ -6,6 +6,32 @@ networks:
     external: false
 
 services:
+  truststore-exporter:
+    image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/truststore-drift-agent:local
+    build:
+      context: ./services/truststore-drift-agent
+    container_name: pki-truststore-exporter
+    networks: [pki-sentinel]
+    command:
+      - serve
+      - -b
+      - /policy/baseline.json
+      - --public-key
+      - /policy/baseline.pub
+      - --extra-ca-dir
+      - /extra-cas
+      - --log
+      - ""
+      - --listen
+      - :9120
+      - --interval
+      - 60s
+    volumes:
+      - ./.data/truststore/published:/policy:ro
+      - ./.data/truststore/extra-cas:/extra-cas:ro
+      - /etc/ssl/certs:/etc/ssl/certs:ro
+    restart: unless-stopped
+
   prometheus:
     image: ${PROMETHEUS_IMAGE}
     container_name: pki-prometheus
@@ -19,6 +45,8 @@ services:
       - --storage.tsdb.path=/prometheus
       - --web.enable-lifecycle
     ports: ["${PROMETHEUS_PORT}:9090"]
+    depends_on:
+      - truststore-exporter
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/-/ready || exit 1"]
       interval: 5s

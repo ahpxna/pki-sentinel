@@ -13,5 +13,5 @@ ARGS=(chaos sweep --trials "${TRIALS}")
 [[ -n "${DELAYS}" ]] && ARGS+=(--delays "${DELAYS}")
 [[ -n "${OUT}" ]] && ARGS+=(--out "${OUT}")
 
-echo "[chaos] running: probe ${ARGS[*]}"
-(cd "${REPO_ROOT}" && docker compose exec -T revocation-probe probe "${ARGS[@]}")
+echo "[chaos] running one-shot fault runner: probe ${ARGS[*]}"
+(cd "${REPO_ROOT}" && docker compose --profile chaos run --rm -T chaos-runner "${ARGS[@]}")

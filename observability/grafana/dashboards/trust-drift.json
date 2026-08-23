@@ -36,6 +36,39 @@
       "gridPos": { "h": 8, "w": 16, "x": 8, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{ "expr": "pki_truststore_unknown_roots", "refId": "A" }]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Signed baseline valid",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "pki_truststore_baseline_valid", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Trust policy deviations",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "pki_truststore_unknown_roots", "instant": true, "refId": "A" },
+        { "expr": "pki_truststore_missing_roots", "instant": true, "refId": "B" },
+        { "expr": "pki_truststore_changed_roots", "instant": true, "refId": "C" },
+        { "expr": "pki_truststore_expired_roots", "instant": true, "refId": "D" },
+        { "expr": "pki_truststore_expiring_roots", "instant": true, "refId": "E" }
+      ]
     }
   ]
 }

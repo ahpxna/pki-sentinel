@@ -19,6 +19,10 @@ scrape_configs:
     static_configs:
       - targets: ["revocation-probe:9110"]
 
+  - job_name: truststore-exporter
+    static_configs:
+      - targets: ["truststore-exporter:9120"]
+
   - job_name: demo-api
     static_configs:
       - targets: ["demo-api:8000"]

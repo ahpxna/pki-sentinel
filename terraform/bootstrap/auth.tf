@@ -13,6 +13,9 @@ locals {
     traefik-acme = {
       policies = [vault_policy.traefik_acme.name]
     }
+    terraform = {
+      policies = [vault_policy.terraform_bootstrap.name]
+    }
   }
 }
 
@@ -23,7 +26,11 @@ resource "vault_approle_auth_backend_role" "service" {
   token_policies = each.value.policies
   token_ttl      = 3600
   token_max_ttl  = 14400
-  secret_id_ttl  = 86400
+  # Static AppRole credentials are a documented Compose-demo compromise.
+  # Non-expiring SecretIDs avoid an unrecoverable 24-hour failure; production
+  # deployments must replace them with workload identity or managed rotation.
+  secret_id_ttl      = 0
+  secret_id_num_uses = 0
 }
 
 data "vault_approle_auth_backend_role_id" "service" {

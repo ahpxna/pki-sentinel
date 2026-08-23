@@ -5,9 +5,9 @@ see [ADR-0004](adr/0004-assurance-plane-first-class.md).
 
 | Plane | Responsibility |
 |---|---|
-| **Issuance** | Vault/OpenBao PKI (Root + Intermediate), ACME endpoint, Traefik edge, short-lived certs |
-| **Assurance** | `revocation-probe` continuously issues a canary cert, revokes it, and measures whether each client profile actually rejects it. `truststore-drift-agent` detects unauthorized root CA installation. |
-| **Governance** | Prometheus/Grafana/Alertmanager, Wazuh custom decoders for Vault audit logs, OPA policy gates in CI |
+| **Issuance** | Vault issuer adapter, Root + Intermediate, ACME endpoint, Traefik edge, short-lived canaries |
+| **Assurance** | Scenario controller, isolated OCSP/CRL status oracles and relying-party executors, decision/reason evidence, signed attestations, signed trust-policy conformance |
+| **Governance** | Bounded Prometheus metrics, Grafana assurance matrix, Alertmanager, CI security-property, Terraform-plan policy, and Wazuh fixture tests |
 
 ```mermaid
 flowchart TB
@@ -24,11 +24,18 @@ flowchart TB
 
   subgraph Assurance["Assurance plane — the differentiator"]
     direction TB
-    Probe["revocation-probe<br/>issue canary → revoke → poll 7 client profiles"]
-    Drift["truststore-drift-agent<br/>SPKI hash diff vs signed baseline"]
-    Probe -->|canary issue/revoke| IntCA
-    Probe --> Metrics1["pki_revocation_* metrics"]
-    Drift --> Metrics2["pki_truststore_unknown_roots"]
+    Controller["Scenario controller<br/>issue → preflight → revoke"]
+    Oracle["Status oracles<br/>OCSP direct + CRL"]
+    Clients["Isolated profile executors<br/>one Compose container/profile"]
+    Evidence["Evidence engine<br/>decision + reason + fingerprints + hashes + signatures"]
+    Drift["Truststore exporter<br/>signed policy + add/remove/change/expiry"]
+    Controller -->|canary issue/revoke| IntCA
+    Controller --> Oracle
+    Oracle -->|confirm status before clients| Clients
+    Oracle --> Evidence
+    Clients --> Evidence
+    Evidence --> Metrics1["pki_assurance_* metrics + JSON"]
+    Drift --> Metrics2["pki_truststore_* metrics + events"]
   end
 
   subgraph Governance["Governance plane"]
@@ -36,16 +43,64 @@ flowchart TB
     Prom["Prometheus"]
     Grafana["Grafana dashboards"]
     Alertmanager["Alertmanager → Slack / webhook-logger"]
-    Wazuh["Wazuh: Vault audit decoders + rules"]
+    Wazuh["Optional Wazuh<br/>decoder/rule + fixture gate"]
     Metrics1 --> Prom
     Metrics2 --> Prom
     Prom --> Grafana
     Prom --> Alertmanager
-    IntCA -->|file audit device| Wazuh
+    IntCA -.->|audit file| Wazuh
   end
 
   style Assurance fill:#2b3a4a,stroke:#e06c75,stroke-width:2px,color:#fff
 ```
+
+## Evidence semantics
+
+Every executor produces a decision and an independent reason:
+
+- `ACCEPT`: the relying party completed the TLS operation, or an oracle
+  reported a good status.
+- `REJECT`: the client refused the connection or an oracle confirmed that the
+  certificate must not be trusted.
+- `INCONCLUSIVE`: network or TLS conditions prevented a revocation conclusion.
+- `HARNESS_ERROR`: the experiment itself was invalid.
+
+Reasons include `REVOKED`, `MISSING_STATUS`, `INVALID_STATUS`,
+`STALE_STATUS`, `UNKNOWN_STATUS`, `NO_REVOCATION_CHECK`, `NETWORK_FAILURE`,
+`TLS_FAILURE`, and `HARNESS_FAILURE`. A generic TLS or network failure is never
+counted as successful revocation enforcement.
+
+Status oracles execute and satisfy their scenario contracts before client
+executors run. This ordering prevents a client observation from being treated
+as post-revocation evidence before the selected status channels have propagated
+the revocation.
+
+Certificate serials, client versions, TLS backends, exit codes, and output
+hashes are retained in JSON evidence. They are deliberately excluded from
+Prometheus labels to keep cardinality bounded.
+
+An optional Ed25519 attestation envelope signs the exact JSON cycle report,
+records both payload and public-key SHA-256 values, and can be verified without
+the controller. A local file key is only a demo integration; production keys
+belong behind an external KMS or HSM signing boundary.
+
+## Current boundaries
+
+- Vault is the implemented issuer adapter; the assurance model is not intended
+  to depend on Vault-specific behavior.
+- Every enabled profile executes in a distinct Compose service. The services
+  currently derive from one digest-pinned executor image, so binary diversity
+  still depends on the Alpine package set selected for that digest.
+- The chaos command measures a direct OCSP oracle through a loopback fault
+  proxy that accepts only the OCSP responder path. The proxy can inject delay,
+  drop, timeout, HTTP 500, malformed response, and reset faults. The default
+  sweep remains a direct-oracle latency experiment, not a client-specific
+  soft-fail threshold measurement.
+- OPA validates both regression fixtures and the Terraform plan emitted from
+  the live CI bootstrap stack.
+- Wazuh remains optional; CI runs `wazuh-logtest` against the revocation audit
+  fixture, but the repository does not claim a full Wazuh indexer/dashboard
+  deployment.
 
 See [`docs/diagrams/architecture.d2`](diagrams/architecture.d2) for the
 regenerable source (`make diagrams`).

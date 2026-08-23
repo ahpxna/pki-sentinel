@@ -15,13 +15,13 @@ jobs:
       matrix:
         service: [demo-api, revocation-probe, truststore-drift-agent]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.26.6"
           cache-dependency-path: services/${{ matrix.service }}/go.sum
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
         with:
           version: v2.12.2
           working-directory: services/${{ matrix.service }}
@@ -29,8 +29,8 @@ jobs:
   lint-iac:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: hashicorp/setup-terraform@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.9.5"
       - name: terraform fmt
@@ -41,10 +41,10 @@ jobs:
           terraform init -backend=false -input=false
           terraform validate
       - name: tflint
-        uses: terraform-linters/setup-tflint@v4
+        uses: terraform-linters/setup-tflint@6e87008f9dd1fe3e34e66aca6c97b4a69f72a7f4 # v4
       - run: tflint --chdir=terraform/bootstrap
       - name: checkov
-        uses: bridgecrewio/checkov-action@v12.2915.0
+        uses: bridgecrewio/checkov-action@30ab847c9afc9977d1e8611da1f7e03a7260b715 # v12.2915.0
         with:
           directory: terraform/
 
@@ -58,22 +58,22 @@ jobs:
           - services/truststore-drift-agent/Dockerfile
           - observability/webhook-logger/Dockerfile
     steps:
-      - uses: actions/checkout@v7
-      - uses: hadolint/hadolint-action@v3.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
         with:
           dockerfile: ${{ matrix.dockerfile }}
 
   lint-shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: shellcheck
         run: shellcheck scripts/*.sh scripts/lib/*.sh
 
   lint-compose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: cp .env.example .env
       - run: docker compose -f docker-compose.yml config -q
       - run: docker compose -f docker-compose.yml -f docker-compose.observability.yml config -q
@@ -85,14 +85,14 @@ jobs:
       matrix:
         service: [demo-api, revocation-probe, truststore-drift-agent]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.26.6"
       - name: go test
         working-directory: services/${{ matrix.service }}
         run: go test ./... -race -coverprofile=coverage.out
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-${{ matrix.service }}
           path: services/${{ matrix.service }}/coverage.out
@@ -101,12 +101,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.26.6"
           cache: false
-      - uses: hashicorp/setup-terraform@v4
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.9.5"
       - name: start stack
@@ -150,17 +150,29 @@ jobs:
           (cd services/truststore-drift-agent && go build -o bin/truststore-drift-agent .)
       - name: run one probe cycle
         run: |
-          ROLE_ID=$(cut -d= -f2 <(grep VAULT_ROLE_ID .data/approle/revocation-probe.env))
-          SECRET_ID=$(cut -d= -f2 <(grep VAULT_SECRET_ID .data/approle/revocation-probe.env))
-          VAULT_ROLE_ID="$ROLE_ID" VAULT_SECRET_ID="$SECRET_ID" VAULT_ADDR=http://localhost:8200 \
-            ./services/revocation-probe/bin/probe run --once --output json \
-            --config services/revocation-probe/profiles.yaml > /tmp/cycle.json
+          docker compose exec -T revocation-probe \
+            probe run --once --output json > /tmp/cycle.json
           cat /tmp/cycle.json
       - name: go test -tags=integration
         working-directory: tests/integration
         env:
           PROBE_REPORT: /tmp/cycle.json
         run: go test -tags=integration ./... -v
+      - name: install conftest for the live Terraform-plan policy gate
+        run: |
+          curl -fsSLo /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.69.0/conftest_0.69.0_Linux_x86_64.tar.gz
+          echo "96fc2fbf11f0afde51256647127e6f00a64ce839a4d9a0a1aef2426c0e6f4b3f  /tmp/conftest.tar.gz" | sha256sum --check --strict
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+          sudo install /tmp/conftest /usr/local/bin/conftest
+      - name: gate the live Terraform plan with OPA
+        run: |
+          export VAULT_ADDR=http://127.0.0.1:8200
+          export VAULT_TOKEN="$(<.data/tf-token)"
+          terraform -chdir=terraform/bootstrap init -input=false
+          terraform -chdir=terraform/bootstrap plan -input=false -out=/tmp/pki-sentinel.tfplan
+          terraform -chdir=terraform/bootstrap show -json /tmp/pki-sentinel.tfplan > /tmp/pki-sentinel-plan.json
+          conftest test /tmp/pki-sentinel-plan.json --policy policy/opa/
       - name: step summary
         if: always()
         run: |
@@ -171,8 +183,16 @@ jobs:
       - name: upload logs on failure
         if: failure()
         run: mkdir -p artifacts && docker compose logs > artifacts/compose-logs.txt
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: failure()
         with:
           name: integration-failure-logs
           path: artifacts/
+
+  wazuh-logtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: cp .env.example .env
+      - name: validate the revocation audit fixture
+        run: ./scripts/wazuh-logtest.sh

@@ -3,8 +3,10 @@
 Detects unauthorized root CA installation by hashing the SubjectPublicKeyInfo
 of every root in the host trust store and diffing against a signed baseline.
 Baselines are signed with Ed25519; checks fail closed if the JSON is changed
-or the matching public key is unavailable. Keep the private signing key
-offline in production.
+or the matching public key is unavailable. Runtime scans detect added,
+removed, changed, expired, and expiring roots. Keep the private signing key
+offline and pin the verification key outside the monitored endpoint in
+production.
 
 ## Why this exists
 
@@ -23,9 +25,14 @@ truststore-drift-agent baseline -o truststore-baseline.json \
   --private-key baseline.key --public-key baseline.pub
 truststore-drift-agent check -b truststore-baseline.json --public-key baseline.pub
 echo "exit=$?"   # 1 if any unknown root was found
+
+truststore-drift-agent serve -b truststore-baseline.json \
+  --public-key baseline.pub --listen :9120 --interval 60s
 ```
 
-`check` exits 1 on drift, so it can be wired into cron or a CI gate.
+`check` exits 1 on policy drift and 2 when the baseline or scan is invalid.
+`serve` exposes `/metrics`, `/events`, `/healthz`, and `/readyz`; Prometheus
+scrapes this path in `make up-full`.
 Linux certificate bundles/local CA directories and native macOS Keychains are
 supported. `--extra-ca-dir <path>` can point both commands at an isolated CA
 directory for tests or nonstandard installations.

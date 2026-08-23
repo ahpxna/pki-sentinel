@@ -12,7 +12,8 @@ resource "vault_pki_secret_backend_config_urls" "int" {
 # load against propagation time. Benchmark context is documented in
 # docs/benchmarks/ocsp-softfail-thresholds.md.
 resource "vault_generic_endpoint" "int_crl_config" {
-  path = "${vault_mount.pki_int.path}/config/crl"
+  path                 = "${vault_mount.pki_int.path}/config/crl"
+  ignore_absent_fields = true
 
   data_json = jsonencode({
     expiry                    = "72h"
@@ -29,13 +30,10 @@ resource "vault_generic_endpoint" "int_crl_config" {
 }
 
 # Required for AIA and ACME to emit correct URLs.
-resource "vault_generic_endpoint" "int_cluster_config" {
-  path = "${vault_mount.pki_int.path}/config/cluster"
-
-  data_json = jsonencode({
-    path     = "${var.vault_acme_addr}/v1/${vault_mount.pki_int.path}"
-    aia_path = "${var.vault_public_addr}/v1/${vault_mount.pki_int.path}"
-  })
+resource "vault_pki_secret_backend_config_cluster" "int" {
+  backend  = vault_mount.pki_int.path
+  path     = "${var.vault_acme_addr}/v1/${vault_mount.pki_int.path}"
+  aia_path = "${var.vault_public_addr}/v1/${vault_mount.pki_int.path}"
 
   depends_on = [vault_pki_secret_backend_intermediate_set_signed.int]
 }

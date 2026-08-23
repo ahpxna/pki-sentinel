@@ -14,21 +14,31 @@ issuance: Issuance plane {
 
 assurance: Assurance plane (the differentiator) {
   style.fill: "#2b3a4a"
-  probe: "revocation-probe\nissue canary -> revoke -> poll 7 client profiles"
-  drift: "truststore-drift-agent\nSPKI hash diff vs signed baseline"
+  controller: "Scenario controller\nissue -> preflight -> revoke"
+  fault_proxy: "Responder fault proxy\nOCSP path only"
+  oracles: "Status oracles\nOCSP direct + CRL"
+  clients: "Isolated executors\none container/profile"
+  evidence: "Evidence engine\ndecision + reason + hashes + signatures"
+  drift: "Truststore exporter\nsigned policy conformance"
+
+  controller -> fault_proxy
+  fault_proxy -> oracles: OCSP fault path
+  oracles -> clients: status confirmed
+  oracles -> evidence
+  clients -> evidence
 }
 
 governance: Governance plane {
   prometheus: Prometheus
   grafana: Grafana dashboards
   alertmanager: "Alertmanager -> Slack / webhook-logger"
-  wazuh: "Wazuh: Vault audit decoders + rules"
+  wazuh: "Optional Wazuh\ndecoder/rule + fixture gate"
 
   prometheus -> grafana
   prometheus -> alertmanager
 }
 
-assurance.probe -> issuance.int_ca: canary issue/revoke
-assurance.probe -> governance.prometheus: pki_revocation_* metrics
-assurance.drift -> governance.prometheus: pki_truststore_unknown_roots
-issuance.int_ca -> governance.wazuh: file audit device
+assurance.controller -> issuance.int_ca: canary issue/revoke
+assurance.evidence -> governance.prometheus: pki_assurance_* metrics
+assurance.drift -> governance.prometheus: pki_truststore_* metrics
+issuance.int_ca -> governance.wazuh: optional audit parser
