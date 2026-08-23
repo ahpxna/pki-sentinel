@@ -136,6 +136,7 @@ echo "[bootstrap] 7/9 running terraform apply against terraform/bootstrap..."
 )
 
 echo "[bootstrap] 8/9 starting application services with generated AppRole credentials..."
+bash "${REPO_ROOT}/scripts/generate-executor-token.sh"
 dc --profile app up -d
 
 echo "[bootstrap] 9/9 revoking the root token (guard: PKI_SENTINEL_KEEP_ROOT=1 to skip)..."

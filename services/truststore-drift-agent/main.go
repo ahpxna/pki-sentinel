@@ -34,15 +34,35 @@ import (
 // RootEntry is one CA root's identity, as recorded in a baseline or
 // observed on the live host.
 type RootEntry struct {
-	Subject  string `json:"subject"`
-	SPKIHash string `json:"spki_sha256"`
+	Subject            string    `json:"subject"`
+	Issuer             string    `json:"issuer"`
+	Serial             string    `json:"serial"`
+	SPKIHash           string    `json:"spki_sha256"`
+	CertHash           string    `json:"cert_sha256"`
+	PolicyHash         string    `json:"policy_sha256"`
+	NotBefore          time.Time `json:"not_before"`
+	NotAfter           time.Time `json:"not_after"`
+	IsCA               bool      `json:"is_ca"`
+	KeyUsage           []string  `json:"key_usage,omitempty"`
+	SignatureAlgorithm string    `json:"signature_algorithm"`
 }
 
 // Baseline is the full signed set of trusted roots at a point in time.
 type Baseline struct {
-	GeneratedAt time.Time   `json:"generated_at"`
-	Roots       []RootEntry `json:"roots"`
-	Signature   string      `json:"signature"`
+	GeneratedAt    time.Time   `json:"generated_at"`
+	Sequence       uint64      `json:"sequence"`
+	ExpiresAt      time.Time   `json:"expires_at"`
+	PreviousDigest string      `json:"previous_policy_digest,omitempty"`
+	Roots          []RootEntry `json:"roots"`
+	Signature      string      `json:"signature"`
+}
+
+// BaselineState is local monotonic state used to reject a validly signed but
+// older baseline replay. It must live on durable storage separate from the
+// baseline artifact distribution channel.
+type BaselineState struct {
+	HighestSequence uint64 `json:"highest_sequence"`
+	Digest          string `json:"digest"`
 }
 
 // DriftEvent is emitted (stdout + log file) for each newly observed root
@@ -89,9 +109,9 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  truststore-drift-agent baseline -o <baseline.json> [--private-key key.pem] [--public-key key.pub.pem] [--extra-ca-dir path]
-  truststore-drift-agent check -b <baseline.json> [--public-key key.pub.pem] [--extra-ca-dir path] [--log /var/log/pki-sentinel/truststore.json]
-  truststore-drift-agent serve -b <baseline.json> [--public-key key.pub.pem] [--extra-ca-dir path] [--listen :9120] [--interval 60s]`)
+  truststore-drift-agent baseline -o <baseline.json> [--sequence N] [--previous-digest SHA256] [--expires-in 8760h] [--private-key key.pem] [--public-key key.pub.pem] [--extra-ca-dir path]
+  truststore-drift-agent check -b <baseline.json> [--public-key key.pub.pem] [--state baseline.state] [--extra-ca-dir path] [--log /var/log/pki-sentinel/truststore.json]
+  truststore-drift-agent serve -b <baseline.json> [--public-key key.pub.pem] [--state baseline.state] [--extra-ca-dir path] [--listen :9120] [--interval 60s]`)
 }
 
 func cmdBaseline(args []string) {
@@ -99,17 +119,32 @@ func cmdBaseline(args []string) {
 	privateKeyPath := parseFlag(args, "--private-key", outPath+".key")
 	publicKeyPath := parseFlag(args, "--public-key", outPath+".pub")
 	extraCADir := parseFlag(args, "--extra-ca-dir", "/usr/local/share/ca-certificates")
+	sequenceText := parseFlag(args, "--sequence", "1")
+	previousDigest := parseFlag(args, "--previous-digest", "")
+	expiresInText := parseFlag(args, "--expires-in", "8760h")
+	var sequence uint64
+	if _, err := fmt.Sscan(sequenceText, &sequence); err != nil || sequence == 0 {
+		fmt.Fprintf(os.Stderr, "baseline: invalid --sequence %q\n", sequenceText)
+		os.Exit(2)
+	}
+	if sequence > 1 && previousDigest == "" {
+		fmt.Fprintln(os.Stderr, "baseline: --previous-digest is required when --sequence is greater than 1")
+		os.Exit(2)
+	}
+	expiresIn, err := time.ParseDuration(expiresInText)
+	if err != nil || expiresIn <= 0 {
+		fmt.Fprintf(os.Stderr, "baseline: invalid --expires-in %q\n", expiresInText)
+		os.Exit(2)
+	}
 	certs, err := loadTrustStore(extraCADir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "baseline: %v\n", err)
 		os.Exit(1)
 	}
-	b := Baseline{GeneratedAt: time.Now().UTC()}
+	now := time.Now().UTC()
+	b := Baseline{GeneratedAt: now, Sequence: sequence, PreviousDigest: previousDigest, ExpiresAt: now.Add(expiresIn)}
 	for _, c := range certs {
-		b.Roots = append(b.Roots, RootEntry{
-			Subject:  c.Subject.String(),
-			SPKIHash: spkiHash(c),
-		})
+		b.Roots = append(b.Roots, rootEntry(c))
 	}
 	sort.Slice(b.Roots, func(i, j int) bool {
 		if b.Roots[i].SPKIHash == b.Roots[j].SPKIHash {
@@ -136,15 +171,21 @@ func cmdBaseline(args []string) {
 		fmt.Fprintf(os.Stderr, "baseline: writing %s: %v\n", outPath, err)
 		os.Exit(1)
 	}
-	fmt.Printf("wrote signed baseline %s (%d roots); public key: %s\n", outPath, len(b.Roots), publicKeyPath)
+	digest, err := baselineDigest(b)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "baseline: hashing: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("wrote signed baseline %s (%d roots); sequence=%d digest=%s; public key: %s\n", outPath, len(b.Roots), b.Sequence, digest, publicKeyPath)
 }
 
 func cmdCheck(args []string) {
 	baselinePath := parseFlag(args, "-b", "truststore-baseline.json")
 	publicKeyPath := parseFlag(args, "--public-key", baselinePath+".pub")
+	statePath := parseFlag(args, "--state", baselinePath+".state")
 	extraCADir := parseFlag(args, "--extra-ca-dir", "/usr/local/share/ca-certificates")
 	logPath := parseFlag(args, "--log", "/var/log/pki-sentinel/truststore.json")
-	result := scanTrustStore(baselinePath, publicKeyPath, extraCADir, time.Now().UTC())
+	result := scanTrustStore(baselinePath, publicKeyPath, statePath, extraCADir, time.Now().UTC())
 	for _, event := range result.Events {
 		line, _ := json.Marshal(event)
 		fmt.Println(string(line))
@@ -164,7 +205,7 @@ func cmdCheck(args []string) {
 	}
 }
 
-func loadVerifiedBaseline(baselinePath, publicKeyPath string) (Baseline, error) {
+func loadVerifiedBaseline(baselinePath, publicKeyPath, statePath string) (Baseline, error) {
 	// #nosec G703 -- reading an operator-selected baseline path is intentional.
 	data, err := os.ReadFile(baselinePath)
 	if err != nil {
@@ -181,12 +222,21 @@ func loadVerifiedBaseline(baselinePath, publicKeyPath string) (Baseline, error) 
 	if err := verifyBaseline(baseline, publicKey); err != nil {
 		return Baseline{}, fmt.Errorf("baseline signature verification failed: %w", err)
 	}
+	if baseline.Sequence == 0 || baseline.ExpiresAt.IsZero() {
+		return Baseline{}, fmt.Errorf("baseline lacks required sequence or expiry")
+	}
+	if time.Now().UTC().After(baseline.ExpiresAt) {
+		return Baseline{}, fmt.Errorf("baseline expired at %s", baseline.ExpiresAt.Format(time.RFC3339))
+	}
+	if err := verifyAndAdvanceBaselineState(baseline, statePath); err != nil {
+		return Baseline{}, err
+	}
 	return baseline, nil
 }
 
-func scanTrustStore(baselinePath, publicKeyPath, extraCADir string, now time.Time) ScanResult {
+func scanTrustStore(baselinePath, publicKeyPath, statePath, extraCADir string, now time.Time) ScanResult {
 	result := ScanResult{LastScan: now}
-	baseline, err := loadVerifiedBaseline(baselinePath, publicKeyPath)
+	baseline, err := loadVerifiedBaseline(baselinePath, publicKeyPath, statePath)
 	if err != nil {
 		result.Error = err.Error()
 		result.Events = []DriftEvent{{Timestamp: now, Event: "BASELINE_INVALID"}}
@@ -217,7 +267,7 @@ func evaluateTrustStore(baseline Baseline, certs []*x509.Certificate, now time.T
 	for _, c := range certs {
 		hash := spkiHash(c)
 		subject := c.Subject.String()
-		if _, known := knownByHash[hash]; !known {
+		if known, exists := knownByHash[hash]; !exists {
 			result.UnknownRoots++
 			eventType := "UNKNOWN_ROOT_ADDED"
 			if _, sameSubject := knownBySubject[subject]; sameSubject {
@@ -227,6 +277,16 @@ func evaluateTrustStore(baseline Baseline, certs []*x509.Certificate, now time.T
 			result.Events = append(result.Events, DriftEvent{
 				Timestamp: now, Event: eventType, Subject: subject, SPKIHash: hash,
 			})
+		} else {
+			observed := rootEntry(c)
+			if known.CertHash != "" && known.CertHash != observed.CertHash {
+				result.ChangedRoots++
+				eventType := "ROOT_CERT_CHANGED"
+				if known.PolicyHash != observed.PolicyHash {
+					eventType = "ROOT_POLICY_CHANGED"
+				}
+				result.Events = append(result.Events, DriftEvent{Timestamp: now, Event: eventType, Subject: subject, SPKIHash: hash})
+			}
 		}
 		if now.After(c.NotAfter) {
 			result.ExpiredRoots++
@@ -290,6 +350,7 @@ pki_truststore_last_scan_timestamp_seconds %d
 func cmdServe(args []string) {
 	baselinePath := parseFlag(args, "-b", "truststore-baseline.json")
 	publicKeyPath := parseFlag(args, "--public-key", baselinePath+".pub")
+	statePath := parseFlag(args, "--state", baselinePath+".state")
 	extraCADir := parseFlag(args, "--extra-ca-dir", "/usr/local/share/ca-certificates")
 	logPath := parseFlag(args, "--log", "/var/log/pki-sentinel/truststore.json")
 	listenAddr := parseFlag(args, "--listen", ":9120")
@@ -303,7 +364,7 @@ func cmdServe(args []string) {
 	var mu sync.RWMutex
 	current := ScanResult{LastScan: time.Now().UTC(), Error: "initial scan has not completed"}
 	scan := func() {
-		result := scanTrustStore(baselinePath, publicKeyPath, extraCADir, time.Now().UTC())
+		result := scanTrustStore(baselinePath, publicKeyPath, statePath, extraCADir, time.Now().UTC())
 		if logPath != "" && len(result.Events) > 0 {
 			if err := appendLog(logPath, result.Events); err != nil {
 				fmt.Fprintf(os.Stderr, "serve: writing events: %v\n", err)
@@ -394,6 +455,56 @@ func verifyBaseline(b Baseline, publicKey ed25519.PublicKey) error {
 	}
 	if !ed25519.Verify(publicKey, payload, signature) {
 		return fmt.Errorf("invalid signature")
+	}
+	return nil
+}
+
+func baselineDigest(b Baseline) (string, error) {
+	payload, err := baselinePayload(b)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func verifyAndAdvanceBaselineState(baseline Baseline, statePath string) error {
+	if statePath == "" {
+		return fmt.Errorf("baseline state path is required for rollback protection")
+	}
+	digest, err := baselineDigest(baseline)
+	if err != nil {
+		return fmt.Errorf("hash baseline: %w", err)
+	}
+	state := BaselineState{}
+	if data, err := os.ReadFile(statePath); err == nil {
+		if err := json.Unmarshal(data, &state); err != nil {
+			return fmt.Errorf("parse baseline state: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read baseline state: %w", err)
+	}
+	if baseline.Sequence < state.HighestSequence {
+		return fmt.Errorf("baseline rollback: sequence %d is lower than highest seen %d", baseline.Sequence, state.HighestSequence)
+	}
+	if baseline.Sequence == state.HighestSequence && state.Digest != "" && state.Digest != digest {
+		return fmt.Errorf("baseline equivocation: sequence %d has a different digest", baseline.Sequence)
+	}
+	if baseline.Sequence > state.HighestSequence && state.Digest != "" && baseline.PreviousDigest != state.Digest {
+		return fmt.Errorf("baseline chain mismatch: sequence %d does not reference the accepted prior digest", baseline.Sequence)
+	}
+	if baseline.Sequence == state.HighestSequence && state.Digest == digest {
+		return nil
+	}
+	data, err := json.Marshal(BaselineState{HighestSequence: baseline.Sequence, Digest: digest})
+	if err != nil {
+		return fmt.Errorf("encode baseline state: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o750); err != nil {
+		return fmt.Errorf("create baseline state directory: %w", err)
+	}
+	if err := os.WriteFile(statePath, data, 0o600); err != nil {
+		return fmt.Errorf("write baseline state: %w", err)
 	}
 	return nil
 }
@@ -493,6 +604,40 @@ func appendLog(path string, events []DriftEvent) error {
 func spkiHash(c *x509.Certificate) string {
 	sum := sha256.Sum256(c.RawSubjectPublicKeyInfo)
 	return hex.EncodeToString(sum[:])
+}
+
+func certificateHash(c *x509.Certificate) string {
+	sum := sha256.Sum256(c.Raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func rootEntry(c *x509.Certificate) RootEntry {
+	policy, _ := json.Marshal(struct {
+		IsCA                bool
+		KeyUsage            x509.KeyUsage
+		ExtKeyUsage         []x509.ExtKeyUsage
+		PermittedDNSDomains []string
+		PolicyIdentifiers   any
+	}{c.IsCA, c.KeyUsage, c.ExtKeyUsage, c.PermittedDNSDomains, c.PolicyIdentifiers})
+	policyDigest := sha256.Sum256(policy)
+	return RootEntry{
+		Subject: c.Subject.String(), Issuer: c.Issuer.String(), Serial: c.SerialNumber.String(), SPKIHash: spkiHash(c), CertHash: certificateHash(c), PolicyHash: hex.EncodeToString(policyDigest[:]),
+		NotBefore: c.NotBefore.UTC(), NotAfter: c.NotAfter.UTC(), IsCA: c.IsCA, KeyUsage: keyUsageNames(c.KeyUsage), SignatureAlgorithm: c.SignatureAlgorithm.String(),
+	}
+}
+
+func keyUsageNames(usage x509.KeyUsage) []string {
+	values := []struct {
+		bit  x509.KeyUsage
+		name string
+	}{{x509.KeyUsageDigitalSignature, "digital_signature"}, {x509.KeyUsageCertSign, "cert_sign"}, {x509.KeyUsageCRLSign, "crl_sign"}}
+	var names []string
+	for _, value := range values {
+		if usage&value.bit != 0 {
+			names = append(names, value.name)
+		}
+	}
+	return names
 }
 
 // loadTrustStore enumerates trusted root CAs from the platform-appropriate

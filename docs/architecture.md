@@ -66,23 +66,30 @@ Every executor produces a decision and an independent reason:
 - `HARNESS_ERROR`: the experiment itself was invalid.
 
 Reasons include `REVOKED`, `MISSING_STATUS`, `INVALID_STATUS`,
-`STALE_STATUS`, `UNKNOWN_STATUS`, `NO_REVOCATION_CHECK`, `NETWORK_FAILURE`,
-`TLS_FAILURE`, and `HARNESS_FAILURE`. A generic TLS or network failure is never
-counted as successful revocation enforcement.
+`STALE_STATUS`, `FUTURE_STATUS`, `MISSING_FRESHNESS_BOUND`, `UNKNOWN_STATUS`,
+`NO_REVOCATION_CHECK`, `NETWORK_FAILURE`, `TLS_FAILURE`, and
+`HARNESS_FAILURE`. A generic TLS or network failure is never counted as
+successful revocation enforcement.
 
-Status oracles execute and satisfy their scenario contracts before client
-executors run. This ordering prevents a client observation from being treated
-as post-revocation evidence before the selected status channels have propagated
-the revocation.
+Status oracles start immediately after issuer acknowledgement. Client
+executors do not wait for an unrelated global oracle barrier: clients with no
+status dependency are measured immediately, and stapled-OCSP clients wait only
+for the renewed staple. The report preserves the acknowledgement timestamp,
+first OCSP/CRL revoked observations, staple publication, and a per-client first
+attempt/decision. It also derives separate propagation, distribution, and
+stapled-client enforcement durations.
 
-Certificate serials, client versions, TLS backends, exit codes, and output
-hashes are retained in JSON evidence. They are deliberately excluded from
-Prometheus labels to keep cardinality bounded.
+Certificate material, OCSP/CRL DER, command stdout/stderr, client versions,
+TLS backends, exit codes, and content hashes are retained as access-controlled,
+content-addressed evidence artifacts. Their references and SHA-256 values are
+included in the JSON report; unbounded data remains excluded from Prometheus
+labels.
 
-An optional Ed25519 attestation envelope signs the exact JSON cycle report,
-records both payload and public-key SHA-256 values, and can be verified without
-the controller. A local file key is only a demo integration; production keys
-belong behind an external KMS or HSM signing boundary.
+An optional Ed25519 attestation envelope signs a to-be-signed statement that
+binds the exact report SHA-256, issue time, run ID, scenario digest, and
+public-key SHA-256. It can be verified without the controller. A local file
+key is only a demo integration; production keys belong behind an external KMS
+or HSM signing boundary.
 
 ## Current boundaries
 
@@ -91,6 +98,10 @@ belong behind an external KMS or HSM signing boundary.
 - Every enabled profile executes in a distinct Compose service. The services
   currently derive from one digest-pinned executor image, so binary diversity
   still depends on the Alpine package set selected for that digest.
+- The internal executor API accepts a fixed profile only, rejects targets
+  outside the configured canary and status hosts, limits request size and
+  duration, and authenticates controller calls with an ignored runtime bearer
+  credential generated before the application profile starts.
 - The chaos command measures a direct OCSP oracle through a loopback fault
   proxy that accepts only the OCSP responder path. The proxy can inject delay,
   drop, timeout, HTTP 500, malformed response, and reset faults. The default

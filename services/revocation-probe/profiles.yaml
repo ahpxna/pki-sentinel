@@ -5,6 +5,16 @@ poll_interval: 2s
 max_wait: 180s
 max_attempts: 90
 
+ocsp_freshness:
+  max_clock_skew: 5m
+  require_next_update: true
+  max_age_without_next_update: 1h
+
+# Baseline conformance records normal implementation behavior. Set true only
+# where every enabled profile must also satisfy the rejection policy.
+policy:
+  enforce: false
+
 profiles:
   - name: openssl-ocsp-direct
     enabled: true

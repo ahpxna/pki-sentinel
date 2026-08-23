@@ -228,46 +228,127 @@ type delayController interface {
 	SetDelay(time.Duration)
 }
 
+// TrialOutcome keeps an experiment failure separate from a broken harness.
+// Decision and Reason are deliberately bounded assurance values so they can
+// be exported without introducing unbounded labels or CSV fields.
+type TrialOutcome struct {
+	Valid    bool
+	Failed   bool
+	Decision string
+	Reason   string
+}
+
+// TrialRecord is one reproducible observation in a fault sweep.
+type TrialRecord struct {
+	Timestamp    time.Time
+	DelayMS      int
+	FaultMode    FaultMode
+	Attempted    bool
+	Valid        bool
+	HarnessError string
+	Failed       bool
+	Decision     string
+	Reason       string
+}
+
+// SweepStats contains denominators required to interpret a failure rate.
+type SweepStats struct {
+	Attempted     int
+	ValidTrials   int
+	HarnessErrors int
+	Failures      int
+}
+
+func (s SweepStats) FailureRate() float64 {
+	if s.ValidTrials == 0 {
+		return 0
+	}
+	return float64(s.Failures) / float64(s.ValidTrials)
+}
+
+// DetailedSweep is both the human-auditable trial log and aggregate counts.
+type DetailedSweep struct {
+	Stats  map[int]SweepStats
+	Trials []TrialRecord
+}
+
 // Sweep runs trials at each delay level and returns the fraction of trials in
 // which the direct status oracle failed to confirm the expected decision.
 func Sweep(ctx context.Context, controller delayController, delaysMS []int, trials int, runTrial func(context.Context, int) (bool, error)) (map[int]float64, error) {
+	detailed, err := SweepDetailed(ctx, controller, delaysMS, trials, func(ctx context.Context, delay int) (TrialOutcome, error) {
+		failed, err := runTrial(ctx, delay)
+		return TrialOutcome{Valid: err == nil, Failed: failed}, err
+	})
+	if err != nil {
+		return rates(detailed.Stats), err
+	}
+	return rates(detailed.Stats), nil
+}
+
+// SweepDetailed runs responder-scoped trials and records their validity,
+// decision, reason, fault mode, and timestamp. Harness errors are excluded
+// from the failure-rate denominator rather than being counted as soft-fails.
+func SweepDetailed(ctx context.Context, controller delayController, delaysMS []int, trials int, runTrial func(context.Context, int) (TrialOutcome, error)) (DetailedSweep, error) {
 	if controller == nil {
-		return nil, fmt.Errorf("chaos: delay controller is required")
+		return DetailedSweep{}, fmt.Errorf("chaos: delay controller is required")
 	}
 	if trials < 1 {
-		return nil, fmt.Errorf("chaos: trials must be at least 1")
+		return DetailedSweep{}, fmt.Errorf("chaos: trials must be at least 1")
 	}
 	defer controller.SetDelay(0)
 
-	results := make(map[int]float64, len(delaysMS))
+	result := DetailedSweep{Stats: make(map[int]SweepStats, len(delaysMS))}
 	for _, delay := range delaysMS {
 		if delay < 0 {
-			return results, fmt.Errorf("chaos: delay must not be negative: %d", delay)
+			return result, fmt.Errorf("chaos: delay must not be negative: %d", delay)
 		}
 		select {
 		case <-ctx.Done():
-			return results, ctx.Err()
+			return result, ctx.Err()
 		default:
 		}
 
 		controller.SetDelay(time.Duration(delay) * time.Millisecond)
-		failures := 0
+		stats := SweepStats{}
 		for range trials {
-			failed, err := runTrial(ctx, delay)
+			mode := FaultDelay
+			if delay == 0 {
+				mode = FaultPassThrough
+			}
+			record := TrialRecord{Timestamp: time.Now().UTC(), DelayMS: delay, FaultMode: mode, Attempted: true}
+			stats.Attempted++
+			outcome, err := runTrial(ctx, delay)
 			if err != nil {
 				log.Printf("chaos: trial error at delay=%dms: %v", delay, err)
-				failures++
+				stats.HarnessErrors++
+				record.HarnessError = err.Error()
+				result.Trials = append(result.Trials, record)
 				continue
 			}
-			if failed {
-				failures++
+			record.Valid, record.Failed, record.Decision, record.Reason = outcome.Valid, outcome.Failed, outcome.Decision, outcome.Reason
+			if !outcome.Valid {
+				stats.HarnessErrors++
+				record.HarnessError = "trial returned invalid outcome"
+			} else {
+				stats.ValidTrials++
+				if outcome.Failed {
+					stats.Failures++
+				}
 			}
+			result.Trials = append(result.Trials, record)
 		}
-		rate := float64(failures) / float64(trials)
-		results[delay] = rate
-		log.Printf("chaos: delay=%dms oracle_failure_rate=%.2f (%d/%d)", delay, rate, failures, trials)
+		result.Stats[delay] = stats
+		log.Printf("chaos: delay=%dms oracle_failure_rate=%.2f (%d/%d valid; %d harness errors)", delay, stats.FailureRate(), stats.Failures, stats.ValidTrials, stats.HarnessErrors)
 	}
-	return results, nil
+	return result, nil
+}
+
+func rates(stats map[int]SweepStats) map[int]float64 {
+	result := make(map[int]float64, len(stats))
+	for delay, value := range stats {
+		result[delay] = value.FailureRate()
+	}
+	return result
 }
 
 // WriteCSV writes sweep results in caller-provided delay order.
@@ -287,6 +368,25 @@ func WriteCSV(path string, delaysMS []int, results map[int]float64) error {
 			continue
 		}
 		if _, err := fmt.Fprintf(f, "%d,%.4f\n", delay, rate); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// WriteDetailedCSV writes one row per attempted trial. It is the evidence
+// format for new experiments; WriteCSV is retained for existing consumers.
+func WriteDetailedCSV(path string, sweep DetailedSweep) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.WriteString("timestamp,delay_ms,fault_mode,attempted,valid,decision,reason,harness_error,oracle_failure\n"); err != nil {
+		return err
+	}
+	for _, trial := range sweep.Trials {
+		if _, err := fmt.Fprintf(f, "%s,%d,%s,%t,%t,%s,%s,%q,%t\n", trial.Timestamp.Format(time.RFC3339Nano), trial.DelayMS, trial.FaultMode, trial.Attempted, trial.Valid, trial.Decision, trial.Reason, trial.HarnessError, trial.Failed); err != nil {
 			return err
 		}
 	}

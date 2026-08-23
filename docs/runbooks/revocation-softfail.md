@@ -2,6 +2,11 @@
 
 **Trigger:** `RevocationSoftFailDetected` (see `observability/prometheus/rules/pki-slo.yml`)
 
+`AssurancePolicyViolation` uses this runbook as well. It means a profile
+matched its documented baseline contract but did not meet the separately
+configured organizational policy. It is a warning unless `policy.enforce` is
+enabled in `services/revocation-probe/profiles.yaml`.
+
 **Impact:** a client profile with `method != "none"` accepted a certificate
 that Vault had already revoked. This means a client that is *supposed* to
 check revocation status failed to detect it. This is an enforcement gap,
@@ -16,7 +21,12 @@ profiles (see [ADR-0007](../adr/0007-alerting-on-method-not-none-only.md)).
    curl -s "http://localhost:${ALERTMANAGER_PORT:-9093}/api/v2/alerts" | jq '.[] | select(.labels.alertname=="RevocationSoftFailDetected")'
    ```
 
-2. Confirm the OCSP responder and CRL are healthy. A soft-fail can indicate a
+2. Retrieve the signed report and its content-addressed artifacts. Check the
+   timeline boundaries before comparing latencies: acknowledgement-to-status,
+   status-to-staple publication, and staple-to-client enforcement are distinct
+   measures.
+
+3. Confirm the OCSP responder and CRL are healthy. A soft-fail can indicate a
    stale or unreachable responder rather than a client implementation defect:
 
    ```bash
@@ -24,13 +34,13 @@ profiles (see [ADR-0007](../adr/0007-alerting-on-method-not-none-only.md)).
    curl -s "http://localhost:${PROMETHEUS_PORT:-9090}/api/v1/query?query=pki_crl_age_seconds" | jq '.data.result'
    ```
 
-3. Run a manual cycle to determine whether the finding is reproducible:
+4. Run a manual cycle to determine whether the finding is reproducible:
 
    ```bash
    make demo-revoke
    ```
 
-4. If reproducible, check whether the affected client's TLS stack or
+5. If reproducible, check whether the affected client's TLS stack or
    configuration changed recently (e.g. a library upgrade that dropped
    `--cert-status` / must-staple support).
 

@@ -2,6 +2,7 @@ package chaos
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -187,5 +188,32 @@ func TestSweepResetsDelayOnCancellation(t *testing.T) {
 	defer controller.mu.Unlock()
 	if got := controller.delays[len(controller.delays)-1]; got != 0 {
 		t.Fatalf("final delay = %s, want 0", got)
+	}
+}
+
+func TestSweepDetailedSeparatesHarnessErrorsFromFailures(t *testing.T) {
+	t.Parallel()
+	controller := &recordingController{}
+	attempt := 0
+	sweep, err := SweepDetailed(context.Background(), controller, []int{10}, 3, func(_ context.Context, _ int) (TrialOutcome, error) {
+		attempt++
+		switch attempt {
+		case 1:
+			return TrialOutcome{Valid: true, Failed: true, Decision: "ACCEPT", Reason: "STATUS_GOOD"}, nil
+		case 2:
+			return TrialOutcome{Valid: true, Failed: false, Decision: "REJECT", Reason: "REVOKED"}, nil
+		default:
+			return TrialOutcome{}, errors.New("executor unavailable")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := sweep.Stats[10]
+	if stats.Attempted != 3 || stats.ValidTrials != 2 || stats.Failures != 1 || stats.HarnessErrors != 1 || stats.FailureRate() != 0.5 {
+		t.Fatalf("unexpected stats: %#v", stats)
+	}
+	if len(sweep.Trials) != 3 || sweep.Trials[2].HarnessError == "" {
+		t.Fatalf("unexpected trials: %#v", sweep.Trials)
 	}
 }

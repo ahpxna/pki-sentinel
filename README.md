@@ -77,10 +77,11 @@ see [`docs/architecture.md`](docs/architecture.md) for the full diagram and
   declared in Terraform.
 - Traefik obtaining certificates from Vault's ACME endpoint with zero
   manual steps.
-- An assurance engine that separates OCSP/CRL status oracles from six
+- An assurance engine that separates OCSP/CRL status oracles from five
   relying-party/client checks and records `decision`, `reason`, scenario,
   client fingerprint, output hashes, exit code, certificate serial, revocation
-  acknowledgement, and decision latency in JSON evidence.
+  acknowledgement, separate status/publication/enforcement timings, and durable
+  raw artifacts in JSON evidence.
 - Correct `curl --cert-status` semantics: missing, invalid, and revoked OCSP
   status all reject instead of being misclassified as acceptance.
 - Both Go's default TLS behavior and a separately named custom
@@ -91,7 +92,8 @@ see [`docs/architecture.md`](docs/architecture.md) for the full diagram and
   issuer, CRL, and target-service traffic remain unaffected.
 - One network-isolated executor container per status-oracle or client profile.
   The controller runs no profile subprocesses when deployed through Compose.
-- Ed25519-signed, tamper-evident assurance-report envelopes with an offline
+- Ed25519-signed, tamper-evident assurance-report envelopes that bind the
+  report digest, issue time, run identity, and scenario with an offline
   verification command.
 - A trust-store exporter with `/metrics` and `/events`, signed-baseline
   verification, and detection of added, removed, changed, expired, and
@@ -152,15 +154,17 @@ public key. A standalone process can produce the same envelope with
 
 ## Assurance matrix
 
-The default `revoked_staple` scenario requires status oracles to confirm
-`REVOKED` before relying-party results are recorded. A result satisfies an
+Status oracles start immediately after issuer acknowledgement. Clients run as
+soon as their own evidence source is available: only stapled-OCSP clients wait
+for a newly published staple. The report separately records status propagation,
+staple distribution, and client enforcement timing. A result satisfies an
 explicit scenario contract; a TLS or network failure is `INCONCLUSIVE`, not a
 successful rejection.
 
 | Profile | Role | Method | `revoked_staple` contract |
 |---|---|---|---|
 | `openssl-ocsp-direct` | status oracle | direct OCSP | `REJECT / REVOKED` |
-| `crl-check` | status oracle | delta CRL | `REJECT / REVOKED` after CRL rebuild |
+| `crl-check` | status oracle | full CRL | `REJECT / REVOKED` after CRL rebuild |
 | `curl-cert-status` | client executor | stapled OCSP | `REJECT`; reason derived from libcurl evidence |
 | `curl-default` | client executor | none | `ACCEPT / NO_REVOCATION_CHECK` |
 | `go-tls-default` | client executor | none | `ACCEPT / NO_REVOCATION_CHECK` |
@@ -190,12 +194,13 @@ convenience. None of them are hidden — see also `SECURITY.md` and
 
 ## Roadmap
 
-1. Add unknown-status and expired-status OCSP response generators to the
+1. Implement the declarative scenario manifests and experiment matrix in
+   [`docs/experiments.md`](docs/experiments.md).
+2. Add unknown-status and expired-status OCSP response generators to the
    responder-only fault proxy.
-2. Move local demo attestation signing to a KMS/HSM-backed signing service.
-3. Enforce declarative scenario manifests in CI.
-4. Add issuer adapters for OpenBao and step-ca after the assurance contracts
-   are stable.
+3. Move local demo attestation signing to a KMS/HSM-backed signing service.
+4. Add independently versioned client-image variants, then issuer adapters
+   for OpenBao and step-ca after the assurance contracts are stable.
 
 ## License
 

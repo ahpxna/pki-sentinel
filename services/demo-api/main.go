@@ -36,7 +36,11 @@ var (
 	})
 	metricRenewals = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "demo_api_cert_renewals_total",
-		Help: "Number of times the client certificate has been renewed.",
+		Help: "Number of client certificate renewal attempts.",
+	})
+	metricRenewalFailures = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "demo_api_cert_renewal_failures_total",
+		Help: "Number of failed certificate renewal attempts.",
 	})
 )
 
@@ -90,9 +94,10 @@ func main() {
 	}
 
 	state := &certState{}
-	if err := issueAndScheduleRenewal(ctx, vc, state); err != nil {
+	if err := issueCertificate(ctx, vc, state); err != nil {
 		log.Fatalf("demo-api: initial cert issuance failed: %v", err)
 	}
+	go renewalController(ctx, vc, state)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -135,9 +140,8 @@ func main() {
 	}
 }
 
-// issueAndScheduleRenewal requests a client certificate from pki_int/issue/client
-// and schedules a background renewal at 2/3 of its TTL.
-func issueAndScheduleRenewal(ctx context.Context, vc *vaultauth.Client, state *certState) error {
+// issueCertificate requests and atomically installs a fresh client certificate.
+func issueCertificate(ctx context.Context, vc *vaultauth.Client, state *certState) error {
 	secret, err := vc.API.Logical().WriteWithContext(ctx, "pki_int/issue/client", map[string]interface{}{
 		"common_name": "demo-api.internal",
 		"ttl":         "24h",
@@ -150,7 +154,7 @@ func issueAndScheduleRenewal(ctx context.Context, vc *vaultauth.Client, state *c
 
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil {
-		return errors.New("issueAndScheduleRenewal: could not decode certificate PEM")
+		return errors.New("issueCertificate: could not decode certificate PEM")
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
@@ -160,29 +164,65 @@ func issueAndScheduleRenewal(ctx context.Context, vc *vaultauth.Client, state *c
 	state.set(cert.Subject.CommonName, cert.NotAfter, certPEM, keyPEM)
 	metricCertExpiry.Set(float64(cert.NotAfter.Unix()))
 
-	ttl := time.Until(cert.NotAfter)
-	renewAt := time.Duration(float64(ttl) * (2.0 / 3.0))
-	if renewAt < time.Minute {
-		renewAt = time.Minute
-	}
+	return nil
+}
 
-	go func() {
-		timer := time.NewTimer(renewAt)
-		defer timer.Stop()
+// renewalController keeps retrying after transient issuer failures. It never
+// abandons renewal because a single Vault outage happened at the normal
+// renewal deadline; retries accelerate as expiry approaches.
+func renewalController(ctx context.Context, vc *vaultauth.Client, state *certState) {
+	for {
+		_, notAfter, ok := state.get()
+		if !ok {
+			return
+		}
+		wait := time.Until(notAfter) * 2 / 3
+		if wait < time.Minute {
+			wait = time.Minute
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
 		case <-timer.C:
+		}
+
+		backoff := time.Second
+		for {
 			metricRenewals.Inc()
-			if err := issueAndScheduleRenewal(ctx, vc, state); err != nil {
-				log.Printf("demo-api: certificate renewal failed: %v", err)
-			} else {
+			if err := issueCertificate(ctx, vc, state); err == nil {
 				log.Printf("demo-api: certificate renewed")
+				break
+			} else {
+				metricRenewalFailures.Inc()
+				log.Printf("demo-api: certificate renewal failed; retrying in %s: %v", backoff, err)
+			}
+			_, currentNotAfter, _ := state.get()
+			remaining := time.Until(currentNotAfter)
+			if remaining <= 0 {
+				backoff = time.Second
+			} else if remaining < 5*time.Minute {
+				backoff = minDuration(backoff, 15*time.Second)
+			} else {
+				backoff = minDuration(backoff*2, time.Minute)
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
 			}
 		}
-	}()
+	}
+}
 
-	return nil
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // reportTokenTTL sets metricTokenTTL from the current token's self-lookup

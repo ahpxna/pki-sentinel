@@ -1,6 +1,11 @@
 package profiles
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/ocsp"
+)
 
 func TestRegistryHasSevenBaselineProfiles(t *testing.T) {
 	reg := Registry()
@@ -82,5 +87,22 @@ func TestExpectationMatchesDecisionAndReason(t *testing.T) {
 	}
 	if expectation.MatchesAfter(Observation{Decision: DecisionReject, Reason: ReasonMissingStatus}) {
 		t.Fatal("after contract accepted the wrong rejection reason")
+	}
+}
+
+func TestCheckOCSPFreshness(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	policy := OCSPFreshnessPolicy{MaxClockSkew: 5 * time.Minute, RequireNextUpdate: true, MaxAgeWithoutNextUpdate: time.Hour}
+	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(-time.Minute), ProducedAt: now.Add(-time.Minute), NextUpdate: now.Add(time.Minute)}, now, policy); got != "" {
+		t.Fatalf("fresh response classified %s", got)
+	}
+	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(6 * time.Minute), NextUpdate: now.Add(time.Hour)}, now, policy); got != ReasonFutureStatus {
+		t.Fatalf("future response classified %s", got)
+	}
+	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(-time.Minute)}, now, policy); got != ReasonMissingFreshness {
+		t.Fatalf("unbounded response classified %s", got)
+	}
+	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(-time.Hour), NextUpdate: now.Add(-time.Minute)}, now, policy); got != ReasonStaleStatus {
+		t.Fatalf("expired response classified %s", got)
 	}
 }

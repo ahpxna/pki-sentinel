@@ -49,11 +49,13 @@ to TLS client soft-fail behavior. The sweep defaults to the same dense delay lis
 1970, 1980, 1990, 2000ms) specifically so new runs are comparable to the
 original figures.
 
-Each run writes `docs/benchmarks/data/chaos-<timestamp>.csv` with columns
-`delay_ms,oracle_failure_rate`. The one-shot process is intentionally not a
-Prometheus scrape target; a run becomes durable evidence only when its raw CSV
-is reviewed and committed. The name avoids presenting direct-oracle failures
-as relying-party soft-fails.
+Each run writes `docs/benchmarks/data/chaos-<timestamp>.csv` with one row per
+attempt: timestamp, delay, fault mode, validity, normalized decision/reason,
+harness error, and direct-oracle failure. Harness errors are retained but
+excluded from the failure-rate denominator. The one-shot process is
+intentionally not a Prometheus scrape target; a run becomes durable evidence
+only when its raw CSV is reviewed and committed. The name avoids presenting
+direct-oracle failures as relying-party soft-fails.
 
 The experiment is useful for validating the responder fault layer and OCSP
 oracle. Separate digest-pinned client environments and client-specific fault

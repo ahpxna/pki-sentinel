@@ -18,6 +18,8 @@ services:
       - /policy/baseline.json
       - --public-key
       - /policy/baseline.pub
+      - --state
+      - /state/baseline.state
       - --extra-ca-dir
       - /extra-cas
       - --log
@@ -28,6 +30,7 @@ services:
       - 60s
     volumes:
       - ./.data/truststore/published:/policy:ro
+      - ./.data/truststore/state:/state
       - ./.data/truststore/extra-cas:/extra-cas:ro
       - /etc/ssl/certs:/etc/ssl/certs:ro
     restart: unless-stopped

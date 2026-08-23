@@ -139,12 +139,13 @@ func cmdRun(args []string) {
 		Profiles: profileRegistry,
 		Stapling: canary.StaplingMode(*stapling),
 		OCSPURL:  vaultPublicAddr + "/v1/pki_int/ocsp",
-		// The demo enables Vault delta CRLs with a one-minute rebuild
-		// interval; the full CRL is intentionally long-lived (72h).
-		CRLURL:            vaultPublicAddr + "/v1/pki_int/crl/delta",
+		// Delta CRLs require base+delta merge semantics. The oracle consumes
+		// the complete issuer-signed CRL as its standalone source of truth.
+		CRLURL:            vaultPublicAddr + "/v1/pki_int/crl",
 		Domain:            domain,
 		CanaryBindHost:    env("PROBE_CANARY_BIND_HOST", ""),
 		CanaryConnectHost: env("PROBE_CANARY_CONNECT_HOST", ""),
+		EvidenceDir:       env("EVIDENCE_DIR", "/var/lib/pki-sentinel/evidence"),
 	}
 
 	runCycle := func() error {
@@ -315,7 +316,7 @@ func cmdAttest(args []string) {
 	if err := attestation.Verify(publicKey, envelope); err != nil {
 		log.Fatalf("attest verify: %v", err)
 	}
-	fmt.Printf("verified %s issued_at=%s payload_sha256=%s\n", envelope.Version, envelope.IssuedAt.Format(time.RFC3339), envelope.PayloadSHA256)
+	fmt.Printf("verified %s issued_at=%s payload_sha256=%s\n", envelope.Statement.Version, envelope.Statement.IssuedAt.Format(time.RFC3339), envelope.Statement.PayloadSHA256)
 }
 
 // --- executor -------------------------------------------------------------
@@ -423,32 +424,37 @@ func cmdChaos(args []string) {
 	}
 
 	r := &runner.Runner{
-		Issuer:   issuerClient,
-		Config:   cfg,
-		Profiles: profiles.Registry(),
-		Stapling: canary.StaplingOff,
-		OCSPURL:  faultProxy.URL() + ocspPath,
-		CRLURL:   vaultPublicAddr + "/v1/pki_int/crl/delta",
-		Domain:   domain,
+		Issuer:      issuerClient,
+		Config:      cfg,
+		Profiles:    profiles.Registry(),
+		Stapling:    canary.StaplingOff,
+		OCSPURL:     faultProxy.URL() + ocspPath,
+		CRLURL:      vaultPublicAddr + "/v1/pki_int/crl",
+		Domain:      domain,
+		EvidenceDir: env("EVIDENCE_DIR", "/var/lib/pki-sentinel/evidence"),
 	}
 
-	results, err := chaos.Sweep(ctx, faultProxy, delays, *trials, func(trialCtx context.Context, delayMS int) (bool, error) {
+	sweep, err := chaos.SweepDetailed(ctx, faultProxy, delays, *trials, func(trialCtx context.Context, delayMS int) (chaos.TrialOutcome, error) {
 		report, err := r.RunOnce(trialCtx)
-		if err != nil {
-			return false, err
+		if report == nil {
+			return chaos.TrialOutcome{}, err
 		}
 		for _, res := range report.Results {
 			if res.Profile == "openssl-ocsp-direct" {
-				return res.Decision != profiles.DecisionReject, nil
+				return chaos.TrialOutcome{
+					Valid: res.Decision != profiles.DecisionHarnessError && res.Err == "",
+					Failed: res.Decision != profiles.DecisionReject,
+					Decision: string(res.Decision), Reason: string(res.Reason),
+				}, nil
 			}
 		}
-		return false, fmt.Errorf("openssl-ocsp-direct result missing from cycle report")
+		return chaos.TrialOutcome{}, fmt.Errorf("openssl-ocsp-direct result missing from cycle report")
 	})
 	if err != nil {
 		log.Printf("chaos sweep: %v", err)
 	}
 
-	if err := chaos.WriteCSV(outPath, delays, results); err != nil {
+	if err := chaos.WriteDetailedCSV(outPath, sweep); err != nil {
 		log.Fatalf("chaos sweep: writing CSV: %v", err)
 	}
 	fmt.Printf("wrote %s\n", outPath)

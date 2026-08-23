@@ -71,6 +71,19 @@ func TestBaselineSignatureRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestBaselineStateRejectsRollback(t *testing.T) {
+	dir := t.TempDir()
+	statePath := dir + "/baseline.state"
+	newer := Baseline{GeneratedAt: time.Now().UTC(), Sequence: 2, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := verifyAndAdvanceBaselineState(newer, statePath); err != nil {
+		t.Fatal(err)
+	}
+	older := Baseline{GeneratedAt: time.Now().UTC(), Sequence: 1, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := verifyAndAdvanceBaselineState(older, statePath); err == nil {
+		t.Fatal("accepted a lower baseline sequence")
+	}
+}
+
 func testCertificate(t *testing.T, commonName string, notAfter time.Time) *x509.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

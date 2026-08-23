@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -90,6 +91,19 @@ func commandEvidence(client, stdout, stderr string, err error) CommandEvidence {
 	return evidence
 }
 
+func withCommandEvidence(observation Observation, client, stdout, stderr string, err error) Observation {
+	observation.Evidence = commandEvidence(client, stdout, stderr, err)
+	observation.Evidence.RawArtifacts = []RawArtifact{
+		{Name: "stdout.txt", MediaType: "text/plain; charset=utf-8", Data: stdout},
+		{Name: "stderr.txt", MediaType: "text/plain; charset=utf-8", Data: stderr},
+	}
+	return observation
+}
+
+func binaryArtifact(name, mediaType string, data []byte) RawArtifact {
+	return RawArtifact{Name: name, MediaType: mediaType, Encoding: "base64", Data: base64.StdEncoding.EncodeToString(data)}
+}
+
 var fingerprintCache sync.Map
 
 func runFingerprintCommand(name string, args ...string) (string, error) {
@@ -159,6 +173,15 @@ func allScenarioExpectations(before Decision, beforeReason Reason, after Decisio
 	}
 }
 
+func rejectPolicy() map[Scenario]Expectation {
+	allowed := []Reason{ReasonRevoked, ReasonMissingStatus, ReasonInvalidStatus, ReasonStaleStatus, ReasonFutureStatus, ReasonUnknownStatus, ReasonMissingFreshness}
+	return map[Scenario]Expectation{
+		ScenarioRevokedStaple:    {After: DecisionReject, AfterReasons: allowed},
+		ScenarioMissingStaple:    {After: DecisionReject, AfterReasons: allowed},
+		ScenarioCachedGoodStaple: {After: DecisionReject, AfterReasons: allowed},
+	}
+}
+
 func exitCode(err error) int {
 	if err == nil {
 		return 0
@@ -213,6 +236,7 @@ func opensslOCSPDirect() Profile {
 		Method:       MethodOCSPDirect,
 		Description:  "openssl ocsp -issuer chain.pem -cert leaf.pem -url <ocsp_url>",
 		Expectations: allScenarioExpectations(DecisionAccept, ReasonStatusGood, DecisionReject, ReasonRevoked),
+		Policy:       rejectPolicy(),
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			started := time.Now()
 			metrics.OCSPResponderUp.Set(0)
@@ -241,10 +265,28 @@ func opensslOCSPDirect() Profile {
 				return observe(DecisionHarnessError, ReasonHarnessFailure), err
 			}
 			defer cleanupLeaf()
+			responseFile, err := os.CreateTemp("", "ocsp-response-*.der")
+			if err != nil {
+				return observe(DecisionHarnessError, ReasonHarnessFailure), fmt.Errorf("create OCSP response artifact: %w", err)
+			}
+			responsePath := responseFile.Name()
+			if err := responseFile.Close(); err != nil {
+				os.Remove(responsePath)
+				return observe(DecisionHarnessError, ReasonHarnessFailure), fmt.Errorf("close OCSP response artifact: %w", err)
+			}
+			defer os.Remove(responsePath)
 
 			stdout, stderr, err := runCmd(ctx, "openssl", "ocsp",
 				"-issuer", issuerPath, "-cert", leafPath, "-url", target.OCSPURL,
-				"-CAfile", chainPath, "-no_nonce")
+				"-CAfile", chainPath, "-no_nonce", "-respout", responsePath)
+			responseDER, responseReadErr := os.ReadFile(responsePath)
+			withEvidence := func(observation Observation) Observation {
+				observation = withCommandEvidence(observation, "openssl", stdout, stderr, err)
+				if responseReadErr == nil && len(responseDER) > 0 {
+					observation = withBinaryEvidence(observation, "ocsp-response.der", "application/ocsp-response", responseDER)
+				}
+				return observation
+			}
 			combined := stdout + stderr
 			if err != nil && !strings.Contains(combined, "revoked") {
 				decision := DecisionHarnessError
@@ -254,8 +296,7 @@ func opensslOCSPDirect() Profile {
 					decision = DecisionInconclusive
 					reason = ReasonNetworkFailure
 				}
-				observation := observe(decision, reason)
-				observation.Evidence = commandEvidence("openssl", stdout, stderr, err)
+				observation := withEvidence(observe(decision, reason))
 				if decision == DecisionHarnessError {
 					return observation, fmt.Errorf("openssl ocsp: %w", err)
 				}
@@ -263,18 +304,15 @@ func opensslOCSPDirect() Profile {
 			}
 			if strings.Contains(combined, "revoked") {
 				metrics.OCSPResponderUp.Set(1)
-				observation := observe(DecisionReject, ReasonRevoked)
-				observation.Evidence = commandEvidence("openssl", stdout, stderr, err)
+				observation := withEvidence(observe(DecisionReject, ReasonRevoked))
 				return observation, nil
 			}
 			if strings.Contains(combined, "good") {
 				metrics.OCSPResponderUp.Set(1)
-				observation := observe(DecisionAccept, ReasonStatusGood)
-				observation.Evidence = commandEvidence("openssl", stdout, stderr, err)
+				observation := withEvidence(observe(DecisionAccept, ReasonStatusGood))
 				return observation, nil
 			}
-			observation := observe(DecisionHarnessError, ReasonHarnessFailure)
-			observation.Evidence = commandEvidence("openssl", stdout, stderr, err)
+			observation := withEvidence(observe(DecisionHarnessError, ReasonHarnessFailure))
 			return observation, fmt.Errorf("openssl ocsp: unrecognized output: %s", combined)
 		},
 	}
@@ -293,6 +331,7 @@ func curlCertStatus() Profile {
 			ScenarioMissingStaple:    {Before: DecisionReject, BeforeReasons: []Reason{ReasonMissingStatus}, After: DecisionReject, AfterReasons: []Reason{ReasonMissingStatus}},
 			ScenarioCachedGoodStaple: {Before: DecisionAccept, BeforeReasons: []Reason{ReasonStatusGood}, After: DecisionAccept, AfterReasons: []Reason{ReasonStatusGood}},
 		},
+		Policy: rejectPolicy(),
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			chainPath, cleanup, err := writeTemp("chain-*.pem", []byte(target.CAChainPEM))
 			if err != nil {
@@ -306,7 +345,7 @@ func curlCertStatus() Profile {
 				fmt.Sprintf("%s:%d:%s:%d", target.Host, target.Port, targetConnectHost(target), target.Port), url)
 			decision, reason := classifyCurlCertStatus(stderr, exitCode(err), err != nil)
 			observation := observe(decision, reason)
-			observation.Evidence = commandEvidence("curl", stdout, stderr, err)
+			observation = withCommandEvidence(observation, "curl", stdout, stderr, err)
 			if decision == DecisionHarnessError {
 				return observation, fmt.Errorf("curl --cert-status: %w (%s)", err, stderr)
 			}
@@ -324,6 +363,7 @@ func curlDefault() Profile {
 		Method:       MethodNone,
 		Description:  "curl --cacert chain.pem https://<host>/",
 		Expectations: allScenarioExpectations(DecisionAccept, ReasonNoRevocationCheck, DecisionAccept, ReasonNoRevocationCheck),
+		Policy:       rejectPolicy(),
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			chainPath, cleanup, err := writeTemp("chain-*.pem", []byte(target.CAChainPEM))
 			if err != nil {
@@ -342,11 +382,11 @@ func curlDefault() Profile {
 					reason = ReasonNetworkFailure
 				}
 				observation := observe(decision, reason)
-				observation.Evidence = commandEvidence("curl", stdout, stderr, err)
+				observation = withCommandEvidence(observation, "curl", stdout, stderr, err)
 				return observation, nil
 			}
 			observation := observe(DecisionAccept, ReasonNoRevocationCheck)
-			observation.Evidence = commandEvidence("curl", stdout, stderr, err)
+			observation = withCommandEvidence(observation, "curl", stdout, stderr, err)
 			return observation, nil
 		},
 	}
@@ -361,6 +401,7 @@ func goTLSDefault() Profile {
 		Method:       MethodNone,
 		Description:  "in-process crypto/tls dial with RootCAs",
 		Expectations: allScenarioExpectations(DecisionAccept, ReasonNoRevocationCheck, DecisionAccept, ReasonNoRevocationCheck),
+		Policy:       rejectPolicy(),
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			pool := x509.NewCertPool()
 			pool.AppendCertsFromPEM([]byte(target.CAChainPEM))
@@ -393,6 +434,7 @@ func goTLSOCSP() Profile {
 			ScenarioMissingStaple:    {Before: DecisionReject, BeforeReasons: []Reason{ReasonMissingStatus}, After: DecisionReject, AfterReasons: []Reason{ReasonMissingStatus}},
 			ScenarioCachedGoodStaple: {Before: DecisionAccept, BeforeReasons: []Reason{ReasonStatusGood}, After: DecisionAccept, AfterReasons: []Reason{ReasonStatusGood}},
 		},
+		Policy: rejectPolicy(),
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			pool := x509.NewCertPool()
 			pool.AppendCertsFromPEM([]byte(target.CAChainPEM))
@@ -431,18 +473,18 @@ func goTLSOCSP() Profile {
 			}
 			resp, err := ocsp.ParseResponseForCert(staple, leaf, issuerCert)
 			if err != nil {
-				return inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonInvalidStatus), nil
+				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonInvalidStatus), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
-			if !resp.NextUpdate.IsZero() && time.Now().After(resp.NextUpdate) {
-				return inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonStaleStatus), nil
+			if reason := checkOCSPFreshness(resp, time.Now(), target.OCSPFreshness); reason != "" {
+				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, reason), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
 			if resp.Status == ocsp.Revoked {
-				return inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonRevoked), nil
+				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonRevoked), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
 			if resp.Status == ocsp.Unknown {
-				return inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonUnknownStatus), nil
+				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonUnknownStatus), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
-			return inProcessObservation("go-hardfail-ocsp", DecisionAccept, ReasonStatusGood), nil
+			return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionAccept, ReasonStatusGood), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 		},
 	}
 }
@@ -456,6 +498,7 @@ func pythonRequests() Profile {
 		Method:       MethodNone,
 		Description:  `python3 -c script with verify=chain.pem`,
 		Expectations: allScenarioExpectations(DecisionAccept, ReasonNoRevocationCheck, DecisionAccept, ReasonNoRevocationCheck),
+		Policy:       rejectPolicy(),
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			chainPath, cleanup, err := writeTemp("chain-*.pem", []byte(target.CAChainPEM))
 			if err != nil {
@@ -476,16 +519,16 @@ print(r.status_code)
 			stdout, stderr, err := runCmd(ctx, "python3", "-c", script)
 			if err != nil {
 				observation := observe(DecisionInconclusive, ReasonTLSFailure)
-				observation.Evidence = commandEvidence("python-requests", stdout, stderr, err)
+				observation = withCommandEvidence(observation, "python-requests", stdout, stderr, err)
 				return observation, nil
 			}
 			if !strings.Contains(stdout, "200") {
 				observation := observe(DecisionHarnessError, ReasonHarnessFailure)
-				observation.Evidence = commandEvidence("python-requests", stdout, stderr, err)
+				observation = withCommandEvidence(observation, "python-requests", stdout, stderr, err)
 				return observation, fmt.Errorf("python-requests: unexpected output: %s", stdout)
 			}
 			observation := observe(DecisionAccept, ReasonNoRevocationCheck)
-			observation.Evidence = commandEvidence("python-requests", stdout, stderr, err)
+			observation = withCommandEvidence(observation, "python-requests", stdout, stderr, err)
 			return observation, nil
 		},
 	}
@@ -498,8 +541,9 @@ func crlCheck() Profile {
 		Name:         "crl-check",
 		Role:         RoleStatusOracle,
 		Method:       MethodCRL,
-		Description:  "download delta CRL, parse with x509.ParseRevocationList, check serial",
+		Description:  "download full CRL, verify issuer signature and freshness, then check serial",
 		Expectations: allScenarioExpectations(DecisionAccept, ReasonStatusGood, DecisionReject, ReasonRevoked),
+		Policy:       rejectPolicy(),
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			leafPEM, err := fetchLeafPEM(ctx, target)
 			if err != nil {
@@ -520,18 +564,63 @@ func crlCheck() Profile {
 			}
 			crl, err := x509.ParseRevocationList(crlBytes)
 			if err != nil {
-				return inProcessObservation("go-crl-oracle", DecisionReject, ReasonInvalidStatus), nil
+				return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonInvalidStatus), "crl.der", "application/pkix-crl", crlBytes), nil
+			}
+			issuerBlock, _ := pem.Decode([]byte(target.IssuerPEM))
+			if issuerBlock == nil {
+				return observe(DecisionHarnessError, ReasonHarnessFailure), fmt.Errorf("crl-check: invalid issuer PEM")
+			}
+			issuerCert, err := x509.ParseCertificate(issuerBlock.Bytes)
+			if err != nil {
+				return observe(DecisionHarnessError, ReasonHarnessFailure), fmt.Errorf("crl-check: parsing issuer: %w", err)
+			}
+			if err := crl.CheckSignatureFrom(issuerCert); err != nil {
+				return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonInvalidStatus), "crl.der", "application/pkix-crl", crlBytes), nil
+			}
+			if crl.ThisUpdate.After(time.Now().Add(5 * time.Minute)) {
+				return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonFutureStatus), "crl.der", "application/pkix-crl", crlBytes), nil
+			}
+			if crl.NextUpdate.IsZero() {
+				return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonMissingFreshness), "crl.der", "application/pkix-crl", crlBytes), nil
+			}
+			if time.Now().After(crl.NextUpdate) {
+				return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonStaleStatus), "crl.der", "application/pkix-crl", crlBytes), nil
 			}
 			metrics.CRLAgeSeconds.Set(time.Since(crl.ThisUpdate).Seconds())
 			metrics.CRLEntries.Set(float64(len(crl.RevokedCertificateEntries)))
 			for _, entry := range crl.RevokedCertificateEntries {
 				if entry.SerialNumber.Cmp(leaf.SerialNumber) == 0 {
-					return inProcessObservation("go-crl-oracle", DecisionReject, ReasonRevoked), nil
+					return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonRevoked), "crl.der", "application/pkix-crl", crlBytes), nil
 				}
 			}
-			return inProcessObservation("go-crl-oracle", DecisionAccept, ReasonStatusGood), nil
+			return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionAccept, ReasonStatusGood), "crl.der", "application/pkix-crl", crlBytes), nil
 		},
 	}
+}
+
+func withBinaryEvidence(observation Observation, name, mediaType string, contents []byte) Observation {
+	observation.Evidence.RawArtifacts = append(observation.Evidence.RawArtifacts, binaryArtifact(name, mediaType, contents))
+	return observation
+}
+
+func checkOCSPFreshness(response *ocsp.Response, now time.Time, configured OCSPFreshnessPolicy) Reason {
+	policy := configured.WithDefaults()
+	if response.ThisUpdate.After(now.Add(policy.MaxClockSkew)) || response.ProducedAt.After(now.Add(policy.MaxClockSkew)) {
+		return ReasonFutureStatus
+	}
+	if response.NextUpdate.IsZero() {
+		if policy.RequireNextUpdate {
+			return ReasonMissingFreshness
+		}
+		if now.Sub(response.ThisUpdate) > policy.MaxAgeWithoutNextUpdate {
+			return ReasonStaleStatus
+		}
+		return ""
+	}
+	if now.After(response.NextUpdate) {
+		return ReasonStaleStatus
+	}
+	return ""
 }
 
 // --- shared helpers ----------------------------------------------------------

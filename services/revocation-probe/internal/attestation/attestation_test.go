@@ -37,6 +37,14 @@ func TestSignAndVerify(t *testing.T) {
 	if err := Verify(publicPEM, envelope); err == nil {
 		t.Fatal("verify accepted a modified payload")
 	}
+	envelope, err = Sign(privatePEM, map[string]string{"decision": "REJECT"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Statement.IssuedAt = envelope.Statement.IssuedAt.Add(time.Hour)
+	if err := Verify(publicPEM, envelope); err == nil {
+		t.Fatal("verify accepted modified signed metadata")
+	}
 }
 
 func TestSignRejectsNonEd25519Key(t *testing.T) {

@@ -1,6 +1,6 @@
-// Package attestation signs durable assurance reports. The package deliberately
-// signs the exact JSON bytes carried in the envelope, so a verifier does not
-// need to reproduce Go's JSON serialization to validate a report.
+// Package attestation signs durable assurance reports. The signed statement
+// binds report metadata to the SHA-256 digest of the exact JSON payload, so a
+// verifier can validate both without reproducing JSON serialization.
 package attestation
 
 import (
@@ -16,23 +16,33 @@ import (
 	"time"
 )
 
-const Version = "pki-sentinel-assurance/v1"
+const Version = "pki-sentinel-assurance/v2"
+
+// Statement is the complete signed to-be-signed record. The payload itself is
+// content-addressed, so changing any envelope metadata that gives the report
+// meaning (including issued_at) invalidates the signature.
+type Statement struct {
+	Version         string    `json:"version"`
+	IssuedAt        time.Time `json:"issued_at"`
+	RunID           string    `json:"run_id,omitempty"`
+	ScenarioDigest  string    `json:"scenario_digest,omitempty"`
+	PayloadSHA256   string    `json:"payload_sha256"`
+	PublicKeySHA256 string    `json:"public_key_sha256"`
+}
 
 // Envelope is a self-contained, detached-signature-friendly evidence record.
 // Payload is retained as JSON so it can be archived and inspected without
 // needing application-specific decoding before integrity verification.
 type Envelope struct {
-	Version         string          `json:"version"`
-	IssuedAt        time.Time       `json:"issued_at"`
-	Payload         json.RawMessage `json:"payload"`
-	PayloadSHA256   string          `json:"payload_sha256"`
-	PublicKeySHA256 string          `json:"public_key_sha256"`
-	Signature       string          `json:"signature"`
+	Statement Statement       `json:"statement"`
+	Payload   json.RawMessage `json:"payload"`
+	Signature string          `json:"signature"`
 }
 
-// Sign serializes payload once and signs those exact bytes with an Ed25519
-// PKCS#8 private key. The resulting envelope is suitable for append-only
-// evidence storage or publication alongside the corresponding public key.
+// Sign serializes payload once and signs a statement that binds its digest,
+// run identity, scenario, issue time, and public-key identity. The resulting
+// envelope is suitable for append-only evidence storage or publication
+// alongside the corresponding public key.
 func Sign(privateKeyPEM []byte, payload any, now time.Time) (Envelope, error) {
 	privateKey, err := parsePrivateKey(privateKeyPEM)
 	if err != nil {
@@ -46,42 +56,76 @@ func Sign(privateKeyPEM []byte, payload any, now time.Time) (Envelope, error) {
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 	publicKeyHash := sha256.Sum256(publicKey)
 
-	return Envelope{
+	statement := Statement{
 		Version:         Version,
 		IssuedAt:        now.UTC(),
-		Payload:         payloadJSON,
+		RunID:           jsonField(payloadJSON, "cycle_id"),
+		ScenarioDigest:  digestJSONField(payloadJSON, "scenario"),
 		PayloadSHA256:   hex.EncodeToString(payloadHash[:]),
 		PublicKeySHA256: hex.EncodeToString(publicKeyHash[:]),
-		Signature:       base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, payloadJSON)),
+	}
+	toBeSigned, err := json.Marshal(statement)
+	if err != nil {
+		return Envelope{}, fmt.Errorf("marshal attestation statement: %w", err)
+	}
+	return Envelope{
+		Statement: statement,
+		Payload:   payloadJSON,
+		Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, toBeSigned)),
 	}, nil
 }
 
 // Verify confirms that an envelope was produced by publicKeyPEM and that its
 // payload was not modified after signing.
 func Verify(publicKeyPEM []byte, envelope Envelope) error {
-	if envelope.Version != Version {
-		return fmt.Errorf("unsupported attestation version %q", envelope.Version)
+	if envelope.Statement.Version != Version {
+		return fmt.Errorf("unsupported attestation version %q", envelope.Statement.Version)
 	}
 	publicKey, err := parsePublicKey(publicKeyPEM)
 	if err != nil {
 		return err
 	}
 	payloadHash := sha256.Sum256(envelope.Payload)
-	if got := hex.EncodeToString(payloadHash[:]); got != envelope.PayloadSHA256 {
+	if got := hex.EncodeToString(payloadHash[:]); got != envelope.Statement.PayloadSHA256 {
 		return fmt.Errorf("payload SHA-256 mismatch")
 	}
 	publicKeyHash := sha256.Sum256(publicKey)
-	if got := hex.EncodeToString(publicKeyHash[:]); got != envelope.PublicKeySHA256 {
+	if got := hex.EncodeToString(publicKeyHash[:]); got != envelope.Statement.PublicKeySHA256 {
 		return fmt.Errorf("public key SHA-256 mismatch")
 	}
 	signature, err := base64.StdEncoding.DecodeString(envelope.Signature)
 	if err != nil {
 		return fmt.Errorf("decode signature: %w", err)
 	}
-	if !ed25519.Verify(publicKey, envelope.Payload, signature) {
+	toBeSigned, err := json.Marshal(envelope.Statement)
+	if err != nil {
+		return fmt.Errorf("marshal attestation statement: %w", err)
+	}
+	if !ed25519.Verify(publicKey, toBeSigned, signature) {
 		return fmt.Errorf("invalid attestation signature")
 	}
 	return nil
+}
+
+func jsonField(payload json.RawMessage, field string) string {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(payload, &values) != nil {
+		return ""
+	}
+	var value string
+	if json.Unmarshal(values[field], &value) != nil {
+		return ""
+	}
+	return value
+}
+
+func digestJSONField(payload json.RawMessage, field string) string {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(payload, &values) != nil || len(values[field]) == 0 {
+		return ""
+	}
+	digest := sha256.Sum256(values[field])
+	return hex.EncodeToString(digest[:])
 }
 
 // ReadPrivateKey reads an Ed25519 PKCS#8 private-key PEM file.

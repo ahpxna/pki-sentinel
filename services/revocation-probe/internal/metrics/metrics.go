@@ -38,6 +38,11 @@ var (
 		Help: "Count of assurance observations by bounded decision and reason dimensions.",
 	}, []string{"profile", "role", "method", "scenario", "decision", "reason"})
 
+	PolicyViolations = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pki_assurance_policy_violations_total",
+		Help: "Count of observations that match the implementation baseline but violate the organizational security policy.",
+	}, []string{"profile", "method", "scenario", "decision", "reason"})
+
 	CycleTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "pki_revocation_cycle_total",
 		Help: "Count of probe cycles by result (ok|error|regression).",
@@ -73,7 +78,6 @@ var (
 		Name: "pki_cert_not_after_timestamp_seconds",
 		Help: "NotAfter timestamp (unix seconds) of the current ephemeral canary certificate.",
 	})
-
 )
 
 // RecordObservation records bounded assurance dimensions. Unbounded evidence

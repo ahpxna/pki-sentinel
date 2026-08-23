@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -33,6 +34,9 @@ func Remote(profile profiles.Profile, baseURL string) profiles.Profile {
 			return profiles.Observation{}, fmt.Errorf("create executor request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if token := os.Getenv("PROBE_EXECUTOR_TOKEN"); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 		response, err := http.DefaultClient.Do(req)
 		if err != nil {
 			// An executor API is harness infrastructure. Its failure must not be
@@ -121,12 +125,20 @@ func Serve(ctx context.Context, address, profileName string) error {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+		if token := os.Getenv("PROBE_EXECUTOR_TOKEN"); token != "" && r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized executor request", http.StatusUnauthorized)
+			return
+		}
 		defer r.Body.Close()
 		var target profiles.Target
 		decoder := json.NewDecoder(io.LimitReader(r.Body, maxRequestBytes))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&target); err != nil {
 			http.Error(w, "invalid probe target", http.StatusBadRequest)
+			return
+		}
+		if err := validateTarget(target); err != nil {
+			http.Error(w, "disallowed probe target", http.StatusForbidden)
 			return
 		}
 		probeCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -153,4 +165,20 @@ func Serve(ctx context.Context, address, profileName string) error {
 		return nil
 	}
 	return err
+}
+
+func validateTarget(target profiles.Target) error {
+	if allowed := os.Getenv("EXECUTOR_ALLOWED_CONNECT_HOST"); allowed != "" && target.ConnectHost != allowed {
+		return fmt.Errorf("connect host %q is not allowed", target.ConnectHost)
+	}
+	for _, rawURL := range []string{target.OCSPURL, target.CRLURL} {
+		parsed, err := url.Parse(rawURL)
+		if err != nil || parsed.Scheme != "http" || parsed.Host == "" {
+			return fmt.Errorf("invalid status URL")
+		}
+		if allowed := os.Getenv("EXECUTOR_ALLOWED_STATUS_HOST"); allowed != "" && parsed.Hostname() != allowed {
+			return fmt.Errorf("status host %q is not allowed", parsed.Hostname())
+		}
+	}
+	return nil
 }

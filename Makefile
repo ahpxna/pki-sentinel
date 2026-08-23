@@ -14,8 +14,12 @@ env: ## Create .env from .env.example if it does not exist
 prepare-dev-tls: ## Generate the local-only TLS certificate used by the Vault ACME endpoint
 	./scripts/prepare-dev-tls.sh
 
+.PHONY: prepare-executor-token
+prepare-executor-token: ## Create the ignored controller-to-executor API credential
+	bash ./scripts/generate-executor-token.sh
+
 .PHONY: up
-up: env prepare-dev-tls ## Start the core stack
+up: env prepare-dev-tls prepare-executor-token ## Start the core stack
 	docker compose up -d
 	@$(MAKE) status
 
@@ -122,7 +126,7 @@ truststore-drift-demo: ## Install a synthetic rogue CA on the host and show trus
 
 .PHONY: truststore-baseline
 truststore-baseline: ## Create a demo signed trust policy for the Prometheus exporter
-	@mkdir -p .data/truststore/extra-cas .data/truststore/published .data/truststore/signer
+	@mkdir -p .data/truststore/extra-cas .data/truststore/published .data/truststore/signer .data/truststore/state
 	docker compose run --rm -T truststore-drift-agent baseline \
 	  -o /data/published/baseline.json \
 	  --private-key /data/signer/baseline.key \

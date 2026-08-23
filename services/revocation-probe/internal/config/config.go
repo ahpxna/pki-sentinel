@@ -18,13 +18,29 @@ type ProfileConfig struct {
 
 // Config is the full profiles.yaml document.
 type Config struct {
-	PollInterval time.Duration   `yaml:"poll_interval"`
-	MaxWait      time.Duration   `yaml:"max_wait"`
-	MaxAttempts  int             `yaml:"max_attempts"`
-	Profiles     []ProfileConfig `yaml:"profiles"`
+	PollInterval  time.Duration       `yaml:"poll_interval"`
+	MaxWait       time.Duration       `yaml:"max_wait"`
+	MaxAttempts   int                 `yaml:"max_attempts"`
+	Profiles      []ProfileConfig     `yaml:"profiles"`
+	OCSPFreshness OCSPFreshnessConfig `yaml:"ocsp_freshness"`
+	Policy        PolicyConfig        `yaml:"policy"`
 
 	// Cycle interval and Vault/service wiring are supplied via flags/env in
 	// cmd/probe rather than profiles.yaml, since they're deployment-specific.
+}
+
+// OCSPFreshnessConfig makes temporal status-acceptance assumptions explicit
+// in every experiment configuration.
+type OCSPFreshnessConfig struct {
+	MaxClockSkew            time.Duration `yaml:"max_clock_skew"`
+	RequireNextUpdate       bool          `yaml:"require_next_update"`
+	MaxAgeWithoutNextUpdate time.Duration `yaml:"max_age_without_next_update"`
+}
+
+// PolicyConfig controls whether policy violations block an otherwise
+// baseline-conformant cycle.
+type PolicyConfig struct {
+	Enforce bool `yaml:"enforce"`
 }
 
 // Load reads and parses profiles.yaml from path.
@@ -48,6 +64,12 @@ func Load(path string) (*Config, error) {
 	}
 	if c.PollInterval < 0 || c.MaxWait < 0 || c.MaxAttempts < 0 {
 		return nil, fmt.Errorf("config: poll_interval, max_wait, and max_attempts must be positive")
+	}
+	if c.OCSPFreshness.MaxClockSkew <= 0 {
+		c.OCSPFreshness.MaxClockSkew = 5 * time.Minute
+	}
+	if c.OCSPFreshness.MaxAgeWithoutNextUpdate <= 0 {
+		c.OCSPFreshness.MaxAgeWithoutNextUpdate = time.Hour
 	}
 	for _, profile := range c.Profiles {
 		if profile.Enabled && profile.Timeout <= 0 {

@@ -37,13 +37,13 @@ groups:
           summary: "CRL has not been rebuilt in over 24h"
           runbook_url: "https://github.com/ahpxna/pki-sentinel/blob/main/docs/runbooks/ocsp-responder-down.md"
 
-      - alert: CertificateExpiringSoon
-        expr: (pki_cert_not_after_timestamp_seconds - time()) < 7*24*3600
+      - alert: CanaryCertificateTTLOutOfBounds
+        expr: (pki_cert_not_after_timestamp_seconds - time()) > 15*60
         for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "The current ephemeral canary certificate expires within 7 days"
+          summary: "The current ephemeral canary certificate has a TTL above the 15-minute experiment bound"
 
       - alert: TruststoreBaselineInvalid
         expr: pki_truststore_baseline_valid != 1
@@ -76,4 +76,13 @@ groups:
           severity: critical
         annotations:
           summary: "A relying-party decision violated its scenario contract"
+          runbook_url: "https://github.com/ahpxna/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"
+
+      - alert: AssurancePolicyViolation
+        expr: increase(pki_assurance_policy_violations_total[1h]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A profile violated the configured revocation policy"
           runbook_url: "https://github.com/ahpxna/pki-sentinel/blob/main/docs/runbooks/revocation-softfail.md"

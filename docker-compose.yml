@@ -12,6 +12,9 @@ x-profile-executor: &profile-executor
   profiles: ["app"]
   networks: [pki-sentinel]
   entrypoint: ["probe"]
+  env_file:
+    - path: ./.data/executor.env
+      required: false
   healthcheck:
     test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8120/healthz"]
     interval: 5s
@@ -20,6 +23,23 @@ x-profile-executor: &profile-executor
     start_period: 5s
 
 services:
+  # The probe runs as an explicit non-root UID. Docker creates absent bind
+  # mount directories as root, so establish durable evidence ownership before
+  # a controller or chaos process attempts to write an artifact.
+  evidence-init:
+    image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/revocation-probe:local
+    build:
+      context: ./services/revocation-probe
+    container_name: pki-evidence-init
+    profiles: ["app", "chaos"]
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["mkdir -p /evidence && chown -R 10001:10001 /evidence && chmod 0750 /evidence"]
+    volumes:
+      - ./.data/evidence:/evidence
+    restart: "no"
+
   # Demo stand-in for a cloud KMS. Holds a transit key used to auto-unseal the
   # primary Vault. In production this would be AWS/GCP/Azure KMS or an HSM —
   # see docs/adr/0002-auto-unseal-tradeoffs.md.
@@ -198,15 +218,21 @@ services:
       PROBE_CANARY_BIND_HOST: 0.0.0.0
       PROBE_CANARY_CONNECT_HOST: revocation-probe
       PROBE_EXECUTORS: openssl-ocsp-direct=http://profile-openssl:8120,crl-check=http://profile-crl:8120,curl-cert-status=http://profile-curl-cert-status:8120,curl-default=http://profile-curl-default:8120,go-tls-default=http://profile-go-default:8120,go-hardfail-ocsp=http://profile-go-hardfail:8120,python-requests=http://profile-python:8120
+      EVIDENCE_DIR: /var/lib/pki-sentinel/evidence
     env_file:
       - path: ./.data/approle/revocation-probe.env
+        required: false
+      - path: ./.data/executor.env
         required: false
     ports: ["${PROBE_METRICS_PORT}:9110"]
     volumes:
       - ./docs/benchmarks/data:/etc/pki-sentinel/docs/benchmarks/data
       - ./.data/attestation:/run/attestation
+      - ./.data/evidence:/var/lib/pki-sentinel/evidence
     restart: unless-stopped
     depends_on:
+      evidence-init:
+        condition: service_completed_successfully
       vault:
         condition: service_healthy
       profile-openssl:
@@ -227,43 +253,43 @@ services:
   profile-openssl:
     <<: *profile-executor
     container_name: pki-profile-openssl
-    environment: {EXECUTOR_ID: profile-openssl}
+    environment: {EXECUTOR_ID: profile-openssl, EXECUTOR_ALLOWED_CONNECT_HOST: revocation-probe, EXECUTOR_ALLOWED_STATUS_HOST: vault}
     command: ["executor", "--profile", "openssl-ocsp-direct"]
 
   profile-crl:
     <<: *profile-executor
     container_name: pki-profile-crl
-    environment: {EXECUTOR_ID: profile-crl}
+    environment: {EXECUTOR_ID: profile-crl, EXECUTOR_ALLOWED_CONNECT_HOST: revocation-probe, EXECUTOR_ALLOWED_STATUS_HOST: vault}
     command: ["executor", "--profile", "crl-check"]
 
   profile-curl-cert-status:
     <<: *profile-executor
     container_name: pki-profile-curl-cert-status
-    environment: {EXECUTOR_ID: profile-curl-cert-status}
+    environment: {EXECUTOR_ID: profile-curl-cert-status, EXECUTOR_ALLOWED_CONNECT_HOST: revocation-probe, EXECUTOR_ALLOWED_STATUS_HOST: vault}
     command: ["executor", "--profile", "curl-cert-status"]
 
   profile-curl-default:
     <<: *profile-executor
     container_name: pki-profile-curl-default
-    environment: {EXECUTOR_ID: profile-curl-default}
+    environment: {EXECUTOR_ID: profile-curl-default, EXECUTOR_ALLOWED_CONNECT_HOST: revocation-probe, EXECUTOR_ALLOWED_STATUS_HOST: vault}
     command: ["executor", "--profile", "curl-default"]
 
   profile-go-default:
     <<: *profile-executor
     container_name: pki-profile-go-default
-    environment: {EXECUTOR_ID: profile-go-default}
+    environment: {EXECUTOR_ID: profile-go-default, EXECUTOR_ALLOWED_CONNECT_HOST: revocation-probe, EXECUTOR_ALLOWED_STATUS_HOST: vault}
     command: ["executor", "--profile", "go-tls-default"]
 
   profile-go-hardfail:
     <<: *profile-executor
     container_name: pki-profile-go-hardfail
-    environment: {EXECUTOR_ID: profile-go-hardfail}
+    environment: {EXECUTOR_ID: profile-go-hardfail, EXECUTOR_ALLOWED_CONNECT_HOST: revocation-probe, EXECUTOR_ALLOWED_STATUS_HOST: vault}
     command: ["executor", "--profile", "go-hardfail-ocsp"]
 
   profile-python:
     <<: *profile-executor
     container_name: pki-profile-python
-    environment: {EXECUTOR_ID: profile-python}
+    environment: {EXECUTOR_ID: profile-python, EXECUTOR_ALLOWED_CONNECT_HOST: revocation-probe, EXECUTOR_ALLOWED_STATUS_HOST: vault}
     command: ["executor", "--profile", "python-requests"]
 
   # One-shot fault runner. Its loopback reverse proxy delays only the OCSP
@@ -279,12 +305,16 @@ services:
       VAULT_ADDR: http://vault:8200
       VAULT_PUBLIC_ADDR: http://vault:8200
       PKI_DOMAIN: ${PKI_DOMAIN}
+      EVIDENCE_DIR: /var/lib/pki-sentinel/evidence
     env_file:
       - path: ./.data/approle/revocation-probe.env
         required: false
     volumes:
       - ./docs/benchmarks/data:/etc/pki-sentinel/docs/benchmarks/data
+      - ./.data/evidence:/var/lib/pki-sentinel/evidence
     depends_on:
+      evidence-init:
+        condition: service_completed_successfully
       vault:
         condition: service_healthy
 

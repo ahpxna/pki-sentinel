@@ -39,6 +39,8 @@ const (
 	ReasonMissingStatus     Reason = "MISSING_STATUS"
 	ReasonInvalidStatus     Reason = "INVALID_STATUS"
 	ReasonStaleStatus       Reason = "STALE_STATUS"
+	ReasonFutureStatus      Reason = "FUTURE_STATUS"
+	ReasonMissingFreshness  Reason = "MISSING_FRESHNESS_BOUND"
 	ReasonUnknownStatus     Reason = "UNKNOWN_STATUS"
 	ReasonNoRevocationCheck Reason = "NO_REVOCATION_CHECK"
 	ReasonNetworkFailure    Reason = "NETWORK_FAILURE"
@@ -81,18 +83,55 @@ type Target struct {
 	CRLURL            string
 	CertificateSerial string
 	Scenario          Scenario
+	OCSPFreshness     OCSPFreshnessPolicy
+}
+
+// OCSPFreshnessPolicy makes the temporal acceptance rules explicit rather
+// than relying on a parser's cryptographic validation alone.
+type OCSPFreshnessPolicy struct {
+	MaxClockSkew            time.Duration
+	RequireNextUpdate       bool
+	MaxAgeWithoutNextUpdate time.Duration
+}
+
+func (p OCSPFreshnessPolicy) WithDefaults() OCSPFreshnessPolicy {
+	if p.MaxClockSkew <= 0 {
+		p.MaxClockSkew = 5 * time.Minute
+	}
+	if p.MaxAgeWithoutNextUpdate <= 0 {
+		p.MaxAgeWithoutNextUpdate = time.Hour
+	}
+	return p
+}
+
+// Artifact describes durable raw evidence retained outside Prometheus.
+type Artifact struct {
+	Path      string `json:"path"`
+	SHA256    string `json:"sha256"`
+	MediaType string `json:"media_type"`
+}
+
+// RawArtifact is an executor-to-controller transport record. The runner
+// persists it and removes its content from the final JSON report.
+type RawArtifact struct {
+	Name      string `json:"name"`
+	MediaType string `json:"media_type"`
+	Encoding  string `json:"encoding,omitempty"`
+	Data      string `json:"data"`
 }
 
 // CommandEvidence preserves enough subprocess evidence for independent
 // diagnosis without putting unbounded certificate identifiers into metrics.
 type CommandEvidence struct {
-	Client        string `json:"client,omitempty"`
-	Executor      string `json:"executor,omitempty"`
-	ClientVersion string `json:"client_version,omitempty"`
-	TLSBackend    string `json:"tls_backend,omitempty"`
-	ExitCode      *int   `json:"exit_code,omitempty"`
-	StdoutSHA256  string `json:"stdout_sha256,omitempty"`
-	StderrSHA256  string `json:"stderr_sha256,omitempty"`
+	Client        string        `json:"client,omitempty"`
+	Executor      string        `json:"executor,omitempty"`
+	ClientVersion string        `json:"client_version,omitempty"`
+	TLSBackend    string        `json:"tls_backend,omitempty"`
+	ExitCode      *int          `json:"exit_code,omitempty"`
+	StdoutSHA256  string        `json:"stdout_sha256,omitempty"`
+	StderrSHA256  string        `json:"stderr_sha256,omitempty"`
+	Artifacts     []Artifact    `json:"artifacts,omitempty"`
+	RawArtifacts  []RawArtifact `json:"raw_artifacts,omitempty"`
 }
 
 // Observation is returned by one oracle or client execution attempt.
@@ -141,7 +180,15 @@ type Profile struct {
 	Method       CheckMethod
 	Description  string
 	Expectations map[Scenario]Expectation
-	Probe        func(ctx context.Context, target Target) (Observation, error)
+	// Policy defines the organizational security requirement. It is evaluated
+	// independently of the expected implementation behavior.
+	Policy map[Scenario]Expectation
+	Probe  func(ctx context.Context, target Target) (Observation, error)
+}
+
+func (p Profile) PolicyFor(scenario Scenario) (Expectation, bool) {
+	expectation, ok := p.Policy[scenario]
+	return expectation, ok
 }
 
 // Expected returns the scenario-specific contract for this profile.
@@ -152,20 +199,29 @@ func (p Profile) Expected(scenario Scenario) (Expectation, bool) {
 
 // Result is the durable evidence record for one profile in one cycle.
 type Result struct {
-	Profile           string          `json:"profile"`
-	Role              Role            `json:"role"`
-	Method            CheckMethod     `json:"method"`
-	Scenario          Scenario        `json:"scenario"`
-	Decision          Decision        `json:"decision"`
-	Reason            Reason          `json:"reason"`
-	ExpectedDecision  Decision        `json:"expected_decision"`
-	ExpectedReasons   []Reason        `json:"expected_reasons,omitempty"`
-	ExpectationMet    bool            `json:"expectation_met"`
-	CertificateSerial string          `json:"certificate_serial"`
-	RevokeAckAt       time.Time       `json:"revoke_ack_at"`
-	DecisionAt        time.Time       `json:"decision_at,omitempty"`
-	DecisionLatency   time.Duration   `json:"decision_latency_ns,omitempty"`
-	Attempts          int             `json:"attempts"`
-	Evidence          CommandEvidence `json:"evidence,omitempty"`
-	Err               string          `json:"error,omitempty"`
+	Profile           string        `json:"profile"`
+	Role              Role          `json:"role"`
+	Method            CheckMethod   `json:"method"`
+	Scenario          Scenario      `json:"scenario"`
+	Decision          Decision      `json:"decision"`
+	Reason            Reason        `json:"reason"`
+	ExpectedDecision  Decision      `json:"expected_decision"`
+	ExpectedReasons   []Reason      `json:"expected_reasons,omitempty"`
+	ExpectationMet    bool          `json:"expectation_met"`
+	PolicyDecision    Decision      `json:"policy_decision,omitempty"`
+	PolicyReasons     []Reason      `json:"policy_reasons,omitempty"`
+	PolicyMet         bool          `json:"policy_met"`
+	CertificateSerial string        `json:"certificate_serial"`
+	RevokeAckAt       time.Time     `json:"revoke_ack_at"`
+	DecisionAt        time.Time     `json:"decision_at,omitempty"`
+	ClientAttemptAt   time.Time     `json:"client_attempt_at,omitempty"`
+	DecisionLatency   time.Duration `json:"decision_latency_ns,omitempty"`
+	// EnforcementLatency is populated only where a client depends on an
+	// explicitly published evidence artifact (currently a revoked OCSP staple).
+	// It is not interchangeable with DecisionLatency, which starts at issuer
+	// acknowledgement.
+	EnforcementLatency time.Duration   `json:"enforcement_latency_ns,omitempty"`
+	Attempts           int             `json:"attempts"`
+	Evidence           CommandEvidence `json:"evidence,omitempty"`
+	Err                string          `json:"error,omitempty"`
 }
