@@ -22,14 +22,29 @@ run_fixture() {
   local expected_rule="$1"
   local fixture="$2"
   local output
-  # The image keeps its initial manager configuration in data_tmp until its
-  # normal startup entrypoint restores it. Recreate only that configuration
-  # step, layer the staged local rules on top, then execute logtest. Starting
-  # the complete manager service is unnecessary for an isolated rule session.
+  # The image keeps its initial manager files in data_tmp until its normal
+  # startup entrypoint restores them. Recreate that restore step, including
+  # its exception files and runtime directories, then layer local rules on
+  # top. Starting the complete manager service is unnecessary for an isolated
+  # rule session.
   if ! output="$("${COMPOSE[@]}" run --rm --no-deps -T \
     --entrypoint /bin/bash wazuh-manager -euc '
-      mkdir -p /var/ossec/etc
-      cp -a /var/ossec/data_tmp/permanent/var/ossec/etc/. /var/ossec/etc/
+      source /permanent_data.env
+      for permanent_dir in "${PERMANENT_DATA[@]}"; do
+        mkdir -p "${permanent_dir}"
+        cp -a "/var/ossec/data_tmp/permanent${permanent_dir}/." "${permanent_dir}/"
+      done
+      for exclusion_file in "${PERMANENT_DATA_EXCP[@]}"; do
+        mkdir -p "$(dirname "${exclusion_file}")"
+        cp -a "/var/ossec/data_tmp/exclusion${exclusion_file}" "${exclusion_file}"
+      done
+      if [[ -e /var/ossec/logs/ossec ]]; then
+        mv -f /var/ossec/logs/ossec /var/ossec/logs/wazuh
+      fi
+      if [[ -e /var/ossec/queue/ossec ]]; then
+        mv -f /var/ossec/queue/ossec /var/ossec/queue/sockets
+      fi
+      rm -f /var/ossec/queue/db/.template.db
       cp -a /wazuh-config-mount/etc/. /var/ossec/etc/
       exec /var/ossec/bin/wazuh-logtest
     ' < "${fixture}" 2>&1)"; then
