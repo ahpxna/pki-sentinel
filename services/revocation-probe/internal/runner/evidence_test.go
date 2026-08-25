@@ -61,3 +61,47 @@ func TestPersistCycleArtifactsStoresCertificateMaterial(t *testing.T) {
 		t.Fatalf("cycle artifact mode = %o, want 600", got)
 	}
 }
+
+func TestPersistEvidenceTightensExistingPermissions(t *testing.T) {
+	dir := t.TempDir()
+	directory := filepath.Join(dir, "run-existing", "curl-default")
+	if err := os.MkdirAll(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "stderr.txt")
+	if err := os.WriteFile(path, []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &Runner{EvidenceDir: dir}
+	results := []profiles.Result{{
+		Profile: "curl-default",
+		Evidence: profiles.CommandEvidence{RawArtifacts: []profiles.RawArtifact{{
+			Name: "stderr.txt", MediaType: "text/plain", Data: "new",
+		}}},
+	}}
+	if err := r.persistEvidence("run-existing", results); err != nil {
+		t.Fatal(err)
+	}
+
+	dirInfo, err := os.Stat(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("existing evidence directory mode = %o, want 700", got)
+	}
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("existing artifact mode = %o, want 600", got)
+	}
+}

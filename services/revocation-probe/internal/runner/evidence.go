@@ -41,11 +41,11 @@ func (r *Runner) persistResultEvidence(cycleID string, result *profiles.Result) 
 		digest := sha256.Sum256(contents)
 		name := safeArtifactName(raw.Name)
 		directory := filepath.Join(r.EvidenceDir, cycleID, result.Profile)
-		if err := os.MkdirAll(directory, 0o700); err != nil {
+		if err := ensurePrivateDir(directory); err != nil {
 			return fmt.Errorf("create evidence directory: %w", err)
 		}
 		path := filepath.Join(directory, name)
-		if err := os.WriteFile(path, contents, 0o600); err != nil {
+		if err := writePrivateFile(path, contents); err != nil {
 			return fmt.Errorf("write evidence %s: %w", path, err)
 		}
 		evidence.Artifacts = append(evidence.Artifacts, profiles.Artifact{
@@ -54,6 +54,23 @@ func (r *Runner) persistResultEvidence(cycleID string, result *profiles.Result) 
 	}
 	evidence.RawArtifacts = nil
 	return nil
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	// MkdirAll does not change the mode of an existing directory.
+	return os.Chmod(path, 0o700)
+}
+
+func writePrivateFile(path string, contents []byte) error {
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		return err
+	}
+	// WriteFile's mode is only used when the file is created; repair an
+	// existing artifact that may have been created by an older release.
+	return os.Chmod(path, 0o600)
 }
 
 type cycleArtifact struct {
@@ -69,13 +86,13 @@ func (r *Runner) persistCycleArtifacts(cycleID string, artifacts map[string]cycl
 		return nil, fmt.Errorf("evidence directory is required")
 	}
 	directory := filepath.Join(r.EvidenceDir, cycleID)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
+	if err := ensurePrivateDir(directory); err != nil {
 		return nil, fmt.Errorf("create cycle evidence directory: %w", err)
 	}
 	references := make([]profiles.Artifact, 0, len(artifacts))
 	for name, artifact := range artifacts {
 		name = safeArtifactName(name)
-		if err := os.WriteFile(filepath.Join(directory, name), artifact.Contents, 0o600); err != nil {
+		if err := writePrivateFile(filepath.Join(directory, name), artifact.Contents); err != nil {
 			return nil, fmt.Errorf("write cycle artifact %s: %w", name, err)
 		}
 		digest := sha256.Sum256(artifact.Contents)

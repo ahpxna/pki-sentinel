@@ -445,10 +445,9 @@ resource "vault_pki_secret_backend_config_urls" "int" {
 Plus CRL/OCSP behaviour via `vault_generic_endpoint` on `pki_int/config/crl`:
 ```json
 { "expiry": "72h", "disable": false, "ocsp_disable": false, "ocsp_expiry": "1h",
-  "auto_rebuild": true, "auto_rebuild_grace_period": "12h",
-  "enable_delta": true, "delta_rebuild_interval": "1m" }
+  "auto_rebuild": false, "enable_delta": false }
 ```
-`delta_rebuild_interval = 1m` matters: it shortens the window between revocation and CRL visibility, which the Phase 3 probe measures. Also set `ocsp_expiry=1h` deliberately and document that a shorter value trades responder load for faster propagation — this is a knob the benchmark chapter will discuss.
+The assurance baseline consumes Vault's full `/crl` endpoint and expects a successful revocation to become visible immediately, so `auto_rebuild` and delta CRLs are disabled here. Production PKI scenarios should model periodic/delta CRL publication separately, where publication cadence is an explicit assurance variable. Keep `ocsp_expiry=1h` deliberate as another benchmark knob.
 
 Configure the cluster path (required for AIA and ACME to emit correct URLs):
 `vault write pki_int/config/cluster path="${var.vault_public_addr}/v1/pki_int" aia_path="${var.vault_public_addr}/v1/pki_int"`.
@@ -1315,5 +1314,5 @@ A phase is complete only when **all** of the following hold:
 | Traefik cannot solve the challenge | `api.internal` does not resolve from the Vault container | add network aliases; verify with `docker compose exec vault getent hosts api.internal` |
 | Every profile reports `rejected` at cycle start | pre-flight guard missing or connectivity broken | implement Step 3.5 item 3; a "detection" before revocation is a harness bug |
 | Detection times drift upward over time | leaked `netem` qdisc | `tc qdisc del dev eth0 root`; add the deferred cleanup |
-| CRL profile never detects | `delta_rebuild_interval` too long relative to `max_wait` | set `enable_delta=true`, `delta_rebuild_interval=1m` |
+| CRL profile never detects | full CRL did not regenerate after revocation or the probe is reading a stale CRL | verify baseline `auto_rebuild=false`, `enable_delta=false`; revoke again and confirm `/v1/pki_int/crl` changes before debugging the probe |
 | Integration test flaky in CI | fixed sleeps instead of health polling | replace with `wait_for_http`; raise the bounded timeout, never the sleep |

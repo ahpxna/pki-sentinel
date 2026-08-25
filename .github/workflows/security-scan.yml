@@ -60,7 +60,7 @@ jobs:
           output: trivy-fs.sarif
           limit-severities-for-sarif: true
       - name: show trivy filesystem findings on failure
-        if: steps.trivy_fs.outcome == 'failure'
+        if: ${{ failure() && steps.trivy_fs.outcome == 'failure' }}
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           scan-type: fs
@@ -103,7 +103,7 @@ jobs:
           output: trivy-image-${{ matrix.service }}.sarif
           limit-severities-for-sarif: true
       - name: show trivy image findings on failure
-        if: steps.trivy_image.outcome == 'failure'
+        if: ${{ failure() && steps.trivy_image.outcome == 'failure' }}
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           image-ref: pki-sentinel/${{ matrix.service }}:ci
