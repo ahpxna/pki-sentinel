@@ -12,6 +12,7 @@ jobs:
   lint-go:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         service: [demo-api, revocation-probe, truststore-drift-agent]
     steps:
@@ -54,6 +55,7 @@ jobs:
   lint-docker:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         dockerfile:
           - services/demo-api/Dockerfile
@@ -85,6 +87,7 @@ jobs:
   unit-test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         service: [demo-api, revocation-probe, truststore-drift-agent]
     steps:
@@ -172,6 +175,7 @@ jobs:
         run: |
           export VAULT_ADDR=http://127.0.0.1:8200
           export VAULT_TOKEN="$(<.data/tf-token)"
+          export TF_VAR_vault_addr="$VAULT_ADDR"
           terraform -chdir=terraform/bootstrap init -input=false
           terraform -chdir=terraform/bootstrap plan -input=false -out=/tmp/pki-sentinel.tfplan
           terraform -chdir=terraform/bootstrap show -json /tmp/pki-sentinel.tfplan > /tmp/pki-sentinel-plan.json

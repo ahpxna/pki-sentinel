@@ -2,7 +2,9 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -50,7 +52,16 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: reading %s: %w", path, err)
 	}
 	var c Config
-	if err := yaml.Unmarshal(data, &c); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&c); err != nil {
+		return nil, fmt.Errorf("config: parsing %s: %w", path, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("config: parsing %s: multiple YAML documents are not allowed", path)
+		}
 		return nil, fmt.Errorf("config: parsing %s: %w", path, err)
 	}
 	if c.PollInterval == 0 {
@@ -71,12 +82,39 @@ func Load(path string) (*Config, error) {
 	if c.OCSPFreshness.MaxAgeWithoutNextUpdate <= 0 {
 		c.OCSPFreshness.MaxAgeWithoutNextUpdate = time.Hour
 	}
+	seenProfiles := make(map[string]struct{}, len(c.Profiles))
 	for _, profile := range c.Profiles {
+		if profile.Name == "" {
+			return nil, fmt.Errorf("config: profile name must not be empty")
+		}
+		if _, duplicate := seenProfiles[profile.Name]; duplicate {
+			return nil, fmt.Errorf("config: duplicate profile %q", profile.Name)
+		}
+		seenProfiles[profile.Name] = struct{}{}
 		if profile.Enabled && profile.Timeout <= 0 {
 			return nil, fmt.Errorf("config: enabled profile %q must have a positive timeout", profile.Name)
 		}
 	}
 	return &c, nil
+}
+
+// ValidateEnabledProfiles rejects misspelled or stale enabled profile names.
+// Disabled names may remain in the file as documented roadmap placeholders,
+// but an enabled profile must map to a real executor contract.
+func (c *Config) ValidateEnabledProfiles(knownNames []string) error {
+	known := make(map[string]struct{}, len(knownNames))
+	for _, name := range knownNames {
+		known[name] = struct{}{}
+	}
+	for _, profile := range c.Profiles {
+		if !profile.Enabled {
+			continue
+		}
+		if _, ok := known[profile.Name]; !ok {
+			return fmt.Errorf("config: enabled profile %q is not implemented", profile.Name)
+		}
+	}
+	return nil
 }
 
 // TimeoutFor returns the configured timeout for a profile. The fallback is

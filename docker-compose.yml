@@ -124,10 +124,10 @@ services:
     command:
       - |
         export VAULT_TOKEN="$(cat /run/vault-seal/transit-token)"
-        exec /usr/local/bin/docker-entrypoint.sh vault server
+        exec /usr/local/bin/docker-entrypoint.sh vault server -config=/vault/config/vault.hcl
     environment:
       VAULT_ADDR: http://127.0.0.1:8200
-    ports: ["${VAULT_PORT}:8200"]
+    ports: ["${HOST_BIND_ADDRESS:-127.0.0.1}:${VAULT_PORT}:8200"]
     networks: [pki-sentinel]
     volumes:
       - ./config/vault:/vault/config:ro
@@ -224,7 +224,7 @@ services:
         required: false
       - path: ./.data/executor.env
         required: false
-    ports: ["${PROBE_METRICS_PORT}:9110"]
+    ports: ["${HOST_BIND_ADDRESS:-127.0.0.1}:${PROBE_METRICS_PORT}:9110"]
     volumes:
       - ./docs/benchmarks/data:/etc/pki-sentinel/docs/benchmarks/data
       - ./.data/attestation:/run/attestation

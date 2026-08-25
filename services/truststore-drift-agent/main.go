@@ -476,8 +476,14 @@ func verifyAndAdvanceBaselineState(baseline Baseline, statePath string) error {
 	if err != nil {
 		return fmt.Errorf("hash baseline: %w", err)
 	}
+	root, stateName, err := openBaselineStateRoot(statePath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
 	state := BaselineState{}
-	if data, err := os.ReadFile(statePath); err == nil {
+	if data, err := root.ReadFile(stateName); err == nil {
 		if err := json.Unmarshal(data, &state); err != nil {
 			return fmt.Errorf("parse baseline state: %w", err)
 		}
@@ -500,11 +506,75 @@ func verifyAndAdvanceBaselineState(baseline Baseline, statePath string) error {
 	if err != nil {
 		return fmt.Errorf("encode baseline state: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(statePath), 0o750); err != nil {
-		return fmt.Errorf("create baseline state directory: %w", err)
-	}
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
+	if err := writeBaselineStateAtomic(root, stateName, data); err != nil {
 		return fmt.Errorf("write baseline state: %w", err)
+	}
+	return nil
+}
+
+// openBaselineStateRoot anchors all state-file operations to the selected
+// parent directory. os.Root rejects symlink/path traversal that would escape
+// that directory, so an attacker cannot redirect rollback state writes to an
+// arbitrary host path through the state filename.
+func openBaselineStateRoot(statePath string) (*os.Root, string, error) {
+	cleaned := filepath.Clean(statePath)
+	stateName := filepath.Base(cleaned)
+	if stateName == "." || stateName == ".." || stateName == string(filepath.Separator) {
+		return nil, "", fmt.Errorf("invalid baseline state path %q", statePath)
+	}
+	stateDir := filepath.Dir(cleaned)
+	root, err := os.OpenRoot(stateDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("open baseline state directory %s: %w (create the directory before running the agent)", stateDir, err)
+	}
+	return root, stateName, nil
+}
+
+// writeBaselineStateAtomic persists monotonic rollback state without exposing
+// a truncated/partially-written file after a crash. The temporary file lives
+// in the same rooted directory, is fsync'd, atomically renamed, and then the
+// directory entry is fsync'd as well.
+func writeBaselineStateAtomic(root *os.Root, stateName string, data []byte) error {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return fmt.Errorf("generate temporary state name: %w", err)
+	}
+	tempName := fmt.Sprintf(".%s.tmp-%x", stateName, suffix)
+	file, err := root.OpenFile(tempName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create temporary state: %w", err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = root.Remove(tempName)
+		}
+	}()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write temporary state: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync temporary state: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close temporary state: %w", err)
+	}
+	if err := root.Rename(tempName, stateName); err != nil {
+		return fmt.Errorf("replace baseline state: %w", err)
+	}
+	cleanup = false
+	if dir, err := root.Open("."); err == nil {
+		if syncErr := dir.Sync(); syncErr != nil {
+			_ = dir.Close()
+			return fmt.Errorf("sync baseline state directory: %w", syncErr)
+		}
+		if err := dir.Close(); err != nil {
+			return fmt.Errorf("close baseline state directory: %w", err)
+		}
+	} else {
+		return fmt.Errorf("open baseline state directory for sync: %w", err)
 	}
 	return nil
 }

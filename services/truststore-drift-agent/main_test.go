@@ -7,6 +7,9 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +84,75 @@ func TestBaselineStateRejectsRollback(t *testing.T) {
 	older := Baseline{GeneratedAt: time.Now().UTC(), Sequence: 1, ExpiresAt: time.Now().Add(time.Hour)}
 	if err := verifyAndAdvanceBaselineState(older, statePath); err == nil {
 		t.Fatal("accepted a lower baseline sequence")
+	}
+}
+
+func TestBaselineStateWriteIsAtomicAndPrivate(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "baseline.state")
+	baseline := Baseline{GeneratedAt: time.Now().UTC(), Sequence: 3, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := verifyAndAdvanceBaselineState(baseline, statePath); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("state mode=%#o, want 0600", got)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state BaselineState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("state is not valid JSON: %v", err)
+	}
+	if state.HighestSequence != baseline.Sequence || state.Digest == "" {
+		t.Fatalf("unexpected persisted state: %+v", state)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".baseline.state.tmp-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary state files leaked: %v", matches)
+	}
+}
+
+func TestBaselineStateRejectsEscapingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.Mkdir(stateDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside.state")
+	if err := os.WriteFile(outside, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(stateDir, "baseline.state")
+	if err := os.Symlink(outside, statePath); err != nil {
+		t.Fatal(err)
+	}
+	baseline := Baseline{GeneratedAt: time.Now().UTC(), Sequence: 1, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := verifyAndAdvanceBaselineState(baseline, statePath); err == nil {
+		t.Fatal("escaping state symlink was accepted")
+	}
+	data, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "sentinel" {
+		t.Fatalf("outside file was modified: %q", data)
+	}
+}
+
+func TestBaselineStateRequiresExistingParentDirectory(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "missing", "baseline.state")
+	baseline := Baseline{GeneratedAt: time.Now().UTC(), Sequence: 1, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := verifyAndAdvanceBaselineState(baseline, statePath); err == nil {
+		t.Fatal("missing state parent directory was silently created")
 	}
 }
 

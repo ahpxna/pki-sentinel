@@ -652,12 +652,19 @@ func fetchLeafPEM(ctx context.Context, target Target) ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certs[0].Raw}), nil
 }
 
+var statusHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 func httpGet(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := statusHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -665,5 +672,13 @@ func httpGet(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	const maxStatusBodyBytes = 4 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxStatusBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxStatusBodyBytes {
+		return nil, fmt.Errorf("GET %s: response exceeds %d bytes", url, maxStatusBodyBytes)
+	}
+	return body, nil
 }

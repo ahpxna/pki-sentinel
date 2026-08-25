@@ -260,22 +260,47 @@ func scenarioForStapling(mode canary.StaplingMode) profiles.Scenario {
 
 func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, cert *issuer.CanaryCert) (time.Time, error) {
 	deadline := time.Now().Add(r.Config.MaxWait)
+	var lastErr error
+	var lastStatus int
 	for {
-		staple, status, err := r.Issuer.FetchOCSPResponse(ctx, r.OCSPURL, cert.Cert, cert.IssuerCert)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			if lastErr != nil {
+				return time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: %w", lastErr)
+			}
+			return time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: last status=%d", lastStatus)
+		}
+		attemptTimeout := 5 * time.Second
+		if remaining < attemptTimeout {
+			attemptTimeout = remaining
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		staple, status, err := r.Issuer.FetchOCSPResponse(attemptCtx, r.OCSPURL, cert.Cert, cert.IssuerCert)
+		cancel()
+		lastErr, lastStatus = err, status
 		if err == nil && status == ocsp.Revoked {
 			srv.SetOCSPStaple(staple)
 			return time.Now().UTC(), nil
 		}
-		if time.Now().After(deadline) {
-			if err != nil {
-				return time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: %w", err)
-			}
-			return time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: last status=%d", status)
+
+		sleepFor := r.Config.PollInterval
+		if remaining := time.Until(deadline); remaining < sleepFor {
+			sleepFor = remaining
 		}
+		if sleepFor <= 0 {
+			continue
+		}
+		timer := time.NewTimer(sleepFor)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return time.Time{}, ctx.Err()
-		case <-time.After(r.Config.PollInterval):
+		case <-timer.C:
 		}
 	}
 }

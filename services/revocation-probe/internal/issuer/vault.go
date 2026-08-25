@@ -35,6 +35,29 @@ type Client struct {
 	API *vaultapi.Client
 }
 
+const maxStatusResponseBytes = 4 << 20
+
+var statusHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		// Status URLs are security-sensitive issuer endpoints. Do not silently
+		// follow a redirect to a host that was never part of the experiment.
+		return http.ErrUseLastResponse
+	},
+}
+
+func readStatusBody(body io.Reader) ([]byte, error) {
+	limited := io.LimitReader(body, maxStatusResponseBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxStatusResponseBytes {
+		return nil, fmt.Errorf("status response exceeds %d bytes", maxStatusResponseBytes)
+	}
+	return data, nil
+}
+
 // Login performs AppRole login against vaultAddr using roleID/secretID.
 func Login(ctx context.Context, vaultAddr, roleID, secretID string) (*Client, error) {
 	cfg := vaultapi.DefaultConfig()
@@ -207,12 +230,12 @@ func (c *Client) FetchCRL(ctx context.Context, crlURL string) (*x509.RevocationL
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := statusHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("issuer: fetching CRL: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readStatusBody(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -238,12 +261,12 @@ func (c *Client) FetchOCSPResponse(ctx context.Context, ocspURL string, cert, is
 		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/ocsp-request")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := statusHTTPClient.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("issuer: OCSP request: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readStatusBody(resp.Body)
 	if err != nil {
 		return nil, 0, err
 	}

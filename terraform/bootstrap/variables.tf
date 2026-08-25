@@ -10,6 +10,12 @@ variable "org_name" {
   default     = "PKI Sentinel Demo"
 }
 
+variable "vault_addr" {
+  description = "Vault control-plane API address used by Terraform. Keep separate from vault_public_addr, which is embedded in issued certificate status URLs."
+  type        = string
+  default     = "http://127.0.0.1:8200"
+}
+
 variable "vault_public_addr" {
   description = "Address Vault is reachable at from clients, used to construct AIA/CRL/OCSP URLs."
   type        = string

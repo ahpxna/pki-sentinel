@@ -12,7 +12,7 @@
 
   <rule id="100100" level="0">
     <decoded_as>vault-audit</decoded_as>
-    <field name="type">\.+</field>
+    <field name="type">.+</field>
     <description>Vault audit event.</description>
   </rule>
 
@@ -34,14 +34,14 @@
   <rule id="100103" level="8">
     <if_sid>100100</if_sid>
     <field name="request.path">^auth/</field>
-    <field name="error">\.+</field>
+    <field name="error">.+</field>
     <description>Vault auth failure.</description>
     <group>authentication_failed,</group>
   </rule>
 
   <rule id="100104" level="10" frequency="5" timeframe="60">
     <if_matched_sid>100103</if_matched_sid>
-    <same_field>remote_address</same_field>
+    <same_field>request.remote_address</same_field>
     <description>Possible AppRole brute force: 5+ auth failures in 60s from the same source.</description>
     <group>authentication_failures,</group>
   </rule>

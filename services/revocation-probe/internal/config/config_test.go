@@ -76,3 +76,52 @@ func TestLoadRejectsEnabledProfileWithoutTimeout(t *testing.T) {
 		t.Fatal("expected enabled profile without timeout to be rejected")
 	}
 }
+
+func TestLoadRejectsUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profiles.yaml")
+	content := "poll_interval: 2s\nunexpected_security_knob: true\nprofiles: []\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected unknown YAML field to be rejected")
+	}
+}
+
+func TestLoadRejectsDuplicateProfiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profiles.yaml")
+	content := "profiles:\n  - name: curl-default\n    enabled: false\n  - name: curl-default\n    enabled: false\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected duplicate profile to be rejected")
+	}
+}
+
+func TestValidateEnabledProfilesRejectsUnknownEnabledName(t *testing.T) {
+	cfg := &Config{Profiles: []ProfileConfig{
+		{Name: "curl-default", Enabled: true, Timeout: time.Second},
+		{Name: "chromium-headless", Enabled: false, Timeout: time.Second},
+	}}
+	if err := cfg.ValidateEnabledProfiles([]string{"curl-default"}); err != nil {
+		t.Fatalf("disabled roadmap placeholder should be allowed: %v", err)
+	}
+	cfg.Profiles[1].Enabled = true
+	if err := cfg.ValidateEnabledProfiles([]string{"curl-default"}); err == nil {
+		t.Fatal("enabled unknown profile was accepted")
+	}
+}
+
+func TestLoadRejectsMultipleDocuments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profiles.yaml")
+	if err := os.WriteFile(path, []byte("profiles: []\n---\nprofiles: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected multiple YAML documents to be rejected")
+	}
+}

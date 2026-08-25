@@ -1,0 +1,5 @@
+{"time":"2026-08-01T12:05:00.000000Z","type":"response","error":"permission denied","request":{"operation":"update","path":"auth/approle/login","remote_address":"172.20.0.9"}}
+{"time":"2026-08-01T12:05:00.000000Z","type":"response","error":"permission denied","request":{"operation":"update","path":"auth/approle/login","remote_address":"172.20.0.9"}}
+{"time":"2026-08-01T12:05:00.000000Z","type":"response","error":"permission denied","request":{"operation":"update","path":"auth/approle/login","remote_address":"172.20.0.9"}}
+{"time":"2026-08-01T12:05:00.000000Z","type":"response","error":"permission denied","request":{"operation":"update","path":"auth/approle/login","remote_address":"172.20.0.9"}}
+{"time":"2026-08-01T12:05:00.000000Z","type":"response","error":"permission denied","request":{"operation":"update","path":"auth/approle/login","remote_address":"172.20.0.9"}}

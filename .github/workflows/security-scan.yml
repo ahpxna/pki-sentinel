@@ -57,6 +57,7 @@ jobs:
   image-scan:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - service: demo-api
@@ -125,6 +126,7 @@ jobs:
   sast-go:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         service: [demo-api, revocation-probe, truststore-drift-agent]
     steps:

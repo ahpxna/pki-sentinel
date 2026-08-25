@@ -47,7 +47,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --web.enable-lifecycle
-    ports: ["${PROMETHEUS_PORT}:9090"]
+    ports: ["${HOST_BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT}:9090"]
     depends_on:
       - truststore-exporter
     healthcheck:
@@ -68,7 +68,7 @@ services:
     command:
       - --config.file=/etc/alertmanager/alertmanager.yml
       - --storage.path=/alertmanager
-    ports: ["${ALERTMANAGER_PORT}:9093"]
+    ports: ["${HOST_BIND_ADDRESS:-127.0.0.1}:${ALERTMANAGER_PORT}:9093"]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9093/-/ready || exit 1"]
       interval: 5s
@@ -94,7 +94,7 @@ services:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - ./.data/grafana:/var/lib/grafana
-    ports: ["${GRAFANA_PORT}:3000"]
+    ports: ["${HOST_BIND_ADDRESS:-127.0.0.1}:${GRAFANA_PORT}:3000"]
     depends_on:
       prometheus:
         condition: service_healthy

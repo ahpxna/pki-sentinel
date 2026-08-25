@@ -86,6 +86,17 @@ func cmdRun(args []string) {
 	attestationKey := fs.String("attestation-key", env("ASSURANCE_ATTESTATION_KEY", ""), "Ed25519 PKCS#8 private-key PEM used to sign each cycle report")
 	attestationOut := fs.String("attestation-out", env("ASSURANCE_ATTESTATION_OUT", ""), "attestation envelope JSON path (requires --attestation-key)")
 	_ = fs.Parse(args)
+	if *output != "text" && *output != "json" {
+		log.Fatalf("probe run: invalid --output %q; expected text or json", *output)
+	}
+	if *interval <= 0 {
+		log.Fatal("probe run: --interval must be positive")
+	}
+	switch canary.StaplingMode(*stapling) {
+	case canary.StaplingOn, canary.StaplingOff, canary.StaplingStale:
+	default:
+		log.Fatalf("probe run: invalid --stapling %q; expected on, off, or stale", *stapling)
+	}
 	if (*attestationKey == "") != (*attestationOut == "") {
 		log.Fatal("probe run: --attestation-key and --attestation-out must be supplied together")
 	}
@@ -100,6 +111,14 @@ func cmdRun(args []string) {
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
+		log.Fatalf("probe run: %v", err)
+	}
+	registry := profiles.Registry()
+	knownProfiles := make([]string, 0, len(registry))
+	for _, profile := range registry {
+		knownProfiles = append(knownProfiles, profile.Name)
+	}
+	if err := cfg.ValidateEnabledProfiles(knownProfiles); err != nil {
 		log.Fatalf("probe run: %v", err)
 	}
 
@@ -129,7 +148,7 @@ func cmdRun(args []string) {
 	if err != nil {
 		log.Fatalf("probe run: %v", err)
 	}
-	profileRegistry, err := executor.ApplyRemote(profiles.Registry(), profileURLs)
+	profileRegistry, err := executor.ApplyRemote(registry, profileURLs)
 	if err != nil {
 		log.Fatalf("probe run: %v", err)
 	}
@@ -442,8 +461,8 @@ func cmdChaos(args []string) {
 		for _, res := range report.Results {
 			if res.Profile == "openssl-ocsp-direct" {
 				return chaos.TrialOutcome{
-					Valid: res.Decision != profiles.DecisionHarnessError && res.Err == "",
-					Failed: res.Decision != profiles.DecisionReject,
+					Valid:    res.Decision != profiles.DecisionHarnessError && res.Err == "",
+					Failed:   res.Decision != profiles.DecisionReject,
 					Decision: string(res.Decision), Reason: string(res.Reason),
 				}, nil
 			}

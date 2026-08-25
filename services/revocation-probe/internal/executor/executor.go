@@ -6,11 +6,12 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	neturl "net/url"
 	"os"
 	"strings"
 	"time"
@@ -19,6 +20,24 @@ import (
 )
 
 const maxRequestBytes = 1 << 20
+
+var executorHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+func requiredExecutorToken() (string, error) {
+	token := strings.TrimSpace(os.Getenv("PROBE_EXECUTOR_TOKEN"))
+	if token != "" {
+		return token, nil
+	}
+	if os.Getenv("ALLOW_UNAUTHENTICATED_EXECUTOR") == "1" {
+		return "", nil
+	}
+	return "", fmt.Errorf("PROBE_EXECUTOR_TOKEN is required; set ALLOW_UNAUTHENTICATED_EXECUTOR=1 only for an isolated local test")
+}
 
 // Remote returns a profile whose execution occurs at baseURL. The original
 // contract remains local so the runner evaluates identical expectations for
@@ -34,10 +53,14 @@ func Remote(profile profiles.Profile, baseURL string) profiles.Profile {
 			return profiles.Observation{}, fmt.Errorf("create executor request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if token := os.Getenv("PROBE_EXECUTOR_TOKEN"); token != "" {
+		token, err := requiredExecutorToken()
+		if err != nil {
+			return profiles.Observation{}, err
+		}
+		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		response, err := http.DefaultClient.Do(req)
+		response, err := executorHTTPClient.Do(req)
 		if err != nil {
 			// An executor API is harness infrastructure. Its failure must not be
 			// recorded as a relying-party network result.
@@ -60,6 +83,11 @@ func Remote(profile profiles.Profile, baseURL string) profiles.Profile {
 // use profile=url pairs; malformed or unknown profile names are rejected at
 // process startup rather than silently falling back to local execution.
 func ApplyRemote(registry []profiles.Profile, urls map[string]string) ([]profiles.Profile, error) {
+	if len(urls) > 0 {
+		if _, err := requiredExecutorToken(); err != nil {
+			return nil, fmt.Errorf("remote executors: %w", err)
+		}
+	}
 	known := make(map[string]bool, len(registry))
 	result := make([]profiles.Profile, 0, len(registry))
 	for _, profile := range registry {
@@ -94,7 +122,11 @@ func ParseURLs(value string) (map[string]string, error) {
 		if _, exists := urls[name]; exists {
 			return nil, fmt.Errorf("duplicate executor profile %q", name)
 		}
-		urls[name] = url
+		parsed, err := neturl.Parse(url)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+			return nil, fmt.Errorf("invalid executor URL for %q", name)
+		}
+		urls[name] = strings.TrimRight(url, "/")
 	}
 	return urls, nil
 }
@@ -112,6 +144,10 @@ func Serve(ctx context.Context, address, profileName string) error {
 	if selected == nil {
 		return fmt.Errorf("unknown executor profile %q", profileName)
 	}
+	token, err := requiredExecutorToken()
+	if err != nil {
+		return fmt.Errorf("executor %s: %w", profileName, err)
+	}
 	executorID := os.Getenv("EXECUTOR_ID")
 	if executorID == "" {
 		executorID = profileName
@@ -125,9 +161,13 @@ func Serve(ctx context.Context, address, profileName string) error {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		if token := os.Getenv("PROBE_EXECUTOR_TOKEN"); token != "" && r.Header.Get("Authorization") != "Bearer "+token {
-			http.Error(w, "unauthorized executor request", http.StatusUnauthorized)
-			return
+		if token != "" {
+			want := []byte("Bearer " + token)
+			got := []byte(r.Header.Get("Authorization"))
+			if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
+				http.Error(w, "unauthorized executor request", http.StatusUnauthorized)
+				return
+			}
 		}
 		defer r.Body.Close()
 		var target profiles.Target
@@ -172,7 +212,7 @@ func validateTarget(target profiles.Target) error {
 		return fmt.Errorf("connect host %q is not allowed", target.ConnectHost)
 	}
 	for _, rawURL := range []string{target.OCSPURL, target.CRLURL} {
-		parsed, err := url.Parse(rawURL)
+		parsed, err := neturl.Parse(rawURL)
 		if err != nil || parsed.Scheme != "http" || parsed.Host == "" {
 			return fmt.Errorf("invalid status URL")
 		}

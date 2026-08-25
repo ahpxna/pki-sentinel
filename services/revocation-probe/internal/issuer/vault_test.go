@@ -1,9 +1,12 @@
 package issuer
 
 import (
+	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -64,5 +67,34 @@ func TestPEMStrings(t *testing.T) {
 				t.Fatalf("pemStrings(%T) = %v, want %v", input, got, want)
 			}
 		})
+	}
+}
+
+func TestFetchCRLDoesNotFollowRedirects(t *testing.T) {
+	var redirectTargetHit atomic.Bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirectTargetHit.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := (&Client{}).FetchCRL(ctx, redirector.URL); err == nil {
+		t.Fatal("redirecting CRL endpoint was accepted")
+	}
+	if redirectTargetHit.Load() {
+		t.Fatal("CRL client followed redirect to an unapproved endpoint")
+	}
+}
+
+func TestReadStatusBodyRejectsOversizedResponse(t *testing.T) {
+	body := bytes.NewReader(make([]byte, maxStatusResponseBytes+1))
+	if _, err := readStatusBody(body); err == nil {
+		t.Fatal("oversized status response was accepted")
 	}
 }

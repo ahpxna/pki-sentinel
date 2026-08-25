@@ -131,6 +131,7 @@ echo "[bootstrap] 7/9 running terraform apply against terraform/bootstrap..."
   cd "${REPO_ROOT}/terraform/bootstrap"
   export VAULT_ADDR
   export VAULT_TOKEN="${TF_TOKEN}"
+  export TF_VAR_vault_addr="${VAULT_ADDR}"
   terraform init -input=false
   terraform apply -auto-approve -input=false
 )
