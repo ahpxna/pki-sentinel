@@ -39,6 +39,20 @@ type Envelope struct {
 	Signature string          `json:"signature"`
 }
 
+// MarshalEnvelope serializes an envelope without reformatting Payload.
+//
+// PayloadSHA256 binds the exact bytes produced by Sign. Using
+// json.MarshalIndent on Envelope would pretty-print the embedded RawMessage
+// and change those bytes, making an otherwise valid envelope fail Verify after
+// it is written to disk and read back.
+func MarshalEnvelope(envelope Envelope) ([]byte, error) {
+	contents, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("encode attestation envelope: %w", err)
+	}
+	return contents, nil
+}
+
 // Sign serializes payload once and signs a statement that binds its digest,
 // run identity, scenario, issue time, and public-key identity. The resulting
 // envelope is suitable for append-only evidence storage or publication

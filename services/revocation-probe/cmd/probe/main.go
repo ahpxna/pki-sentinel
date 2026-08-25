@@ -217,9 +217,9 @@ func writeAttestation(path string, privateKey []byte, report *runner.CycleReport
 	if err != nil {
 		return err
 	}
-	contents, err := json.MarshalIndent(envelope, "", "  ")
+	contents, err := attestation.MarshalEnvelope(envelope)
 	if err != nil {
-		return fmt.Errorf("encode envelope: %w", err)
+		return err
 	}
 	temporary, err := os.CreateTemp(filepath.Dir(path), ".assurance-attestation-*")
 	if err != nil {
