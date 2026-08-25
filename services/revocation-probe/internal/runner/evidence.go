@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
@@ -32,26 +33,51 @@ func (r *Runner) persistEvidence(cycleID string, results []profiles.Result) erro
 }
 
 func (r *Runner) persistResultEvidence(cycleID string, result *profiles.Result) error {
-	evidence := &result.Evidence
+	return r.persistCommandEvidence(cycleID, result.Profile, "post_revocation", &result.Evidence)
+}
+
+func (r *Runner) persistPreflightEvidence(cycleID string, results []profiles.PreflightResult) error {
+	if r.EvidenceDir == "" {
+		return fmt.Errorf("evidence directory is required")
+	}
+	for i := range results {
+		result := &results[i] //nolint:gosec // G602: i is the range index for results.
+		if err := r.persistCommandEvidence(cycleID, result.Profile, "pre_revocation", &result.Evidence); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runner) persistCommandEvidence(cycleID, profile, phase string, evidence *profiles.CommandEvidence) error {
+	names := make(map[string]struct{}, len(evidence.RawArtifacts))
+	for _, raw := range evidence.RawArtifacts {
+		name := safeArtifactName(raw.Name)
+		if _, duplicate := names[name]; duplicate {
+			return fmt.Errorf("profile %s %s evidence has colliding artifact name %q", profile, phase, name)
+		}
+		names[name] = struct{}{}
+	}
 	for _, raw := range evidence.RawArtifacts {
 		contents, err := rawArtifactBytes(raw)
 		if err != nil {
-			return fmt.Errorf("decode %s/%s: %w", result.Profile, raw.Name, err)
+			return fmt.Errorf("decode %s/%s: %w", profile, raw.Name, err)
 		}
 		digest := sha256.Sum256(contents)
 		name := safeArtifactName(raw.Name)
-		directory := filepath.Join(r.EvidenceDir, cycleID, result.Profile)
+		directory := filepath.Join(r.EvidenceDir, cycleID, profile, phase)
 		if err := ensurePrivateDir(directory); err != nil {
 			return fmt.Errorf("create evidence directory: %w", err)
 		}
 		path := filepath.Join(directory, name)
-		if err := writePrivateFile(path, contents); err != nil {
+		if err := writeNewPrivateFile(path, contents); err != nil {
 			return fmt.Errorf("write evidence %s: %w", path, err)
 		}
 		evidence.Artifacts = append(evidence.Artifacts, profiles.Artifact{
-			Path: filepath.ToSlash(filepath.Join(cycleID, result.Profile, name)), SHA256: hex.EncodeToString(digest[:]), MediaType: raw.MediaType,
+			Path: filepath.ToSlash(filepath.Join(cycleID, profile, phase, name)), SHA256: hex.EncodeToString(digest[:]), MediaType: raw.MediaType,
 		})
 	}
+	sort.Slice(evidence.Artifacts, func(i, j int) bool { return evidence.Artifacts[i].Path < evidence.Artifacts[j].Path })
 	evidence.RawArtifacts = nil
 	return nil
 }
@@ -64,13 +90,27 @@ func ensurePrivateDir(path string) error {
 	return os.Chmod(path, 0o700)
 }
 
-func writePrivateFile(path string, contents []byte) error {
-	if err := os.WriteFile(path, contents, 0o600); err != nil {
+func writeNewPrivateFile(path string, contents []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return err
 	}
-	// WriteFile's mode is only used when the file is created; repair an
-	// existing artifact that may have been created by an older release.
-	return os.Chmod(path, 0o600)
+	cleanup := func(writeErr error) error {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return writeErr
+	}
+	if _, err := f.Write(contents); err != nil {
+		return cleanup(err)
+	}
+	if err := f.Sync(); err != nil {
+		return cleanup(err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 type cycleArtifact struct {
@@ -90,9 +130,20 @@ func (r *Runner) persistCycleArtifacts(cycleID string, artifacts map[string]cycl
 		return nil, fmt.Errorf("create cycle evidence directory: %w", err)
 	}
 	references := make([]profiles.Artifact, 0, len(artifacts))
-	for name, artifact := range artifacts {
-		name = safeArtifactName(name)
-		if err := writePrivateFile(filepath.Join(directory, name), artifact.Contents); err != nil {
+	keys := make([]string, 0, len(artifacts))
+	for name := range artifacts {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	seen := make(map[string]struct{}, len(keys))
+	for _, rawName := range keys {
+		artifact := artifacts[rawName]
+		name := safeArtifactName(rawName)
+		if _, duplicate := seen[name]; duplicate {
+			return nil, fmt.Errorf("cycle evidence has colliding artifact name %q", name)
+		}
+		seen[name] = struct{}{}
+		if err := writeNewPrivateFile(filepath.Join(directory, name), artifact.Contents); err != nil {
 			return nil, fmt.Errorf("write cycle artifact %s: %w", name, err)
 		}
 		digest := sha256.Sum256(artifact.Contents)
@@ -100,6 +151,7 @@ func (r *Runner) persistCycleArtifacts(cycleID string, artifacts map[string]cycl
 			Path: filepath.ToSlash(filepath.Join(cycleID, name)), SHA256: hex.EncodeToString(digest[:]), MediaType: artifact.MediaType,
 		})
 	}
+	sort.Slice(references, func(i, j int) bool { return references[i].Path < references[j].Path })
 	return references, nil
 }
 

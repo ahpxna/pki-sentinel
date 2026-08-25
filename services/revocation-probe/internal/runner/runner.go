@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -47,15 +48,34 @@ type Runner struct {
 // CycleReport is the structured JSON summary of one cycle (used by
 // `probe run --once --output json` and the integration test).
 type CycleReport struct {
-	CycleID        string              `json:"cycle_id"`
-	Scenario       profiles.Scenario   `json:"scenario"`
-	ScenarioDigest string              `json:"scenario_digest"`
-	RevokeAckAt    time.Time           `json:"revoke_ack_at"`
-	Timeline       Timeline            `json:"timeline"`
-	Artifacts      []profiles.Artifact `json:"artifacts,omitempty"`
-	Results        []profiles.Result   `json:"results"`
-	Error          string              `json:"error,omitempty"`
+	CycleID        string                     `json:"cycle_id"`
+	Scenario       profiles.Scenario          `json:"scenario"`
+	ScenarioDigest string                     `json:"scenario_digest"`
+	Valid          bool                       `json:"valid"`
+	Phase          CyclePhase                 `json:"phase"`
+	RevokeAckAt    time.Time                  `json:"revoke_ack_at"`
+	Timeline       Timeline                   `json:"timeline"`
+	Artifacts      []profiles.Artifact        `json:"artifacts,omitempty"`
+	Preflight      []profiles.PreflightResult `json:"preflight,omitempty"`
+	Results        []profiles.Result          `json:"results"`
+	Error          string                     `json:"error,omitempty"`
 }
+
+// CyclePhase records the last experiment boundary reached by a cycle. Failed
+// cycles retain this value in their signed report so invalid trials remain in
+// the denominator instead of disappearing from the evidence set.
+type CyclePhase string
+
+const (
+	PhaseIssue           CyclePhase = "issue"
+	PhaseCanary          CyclePhase = "canary"
+	PhasePreflight       CyclePhase = "preflight"
+	PhaseRevoke          CyclePhase = "revoke"
+	PhaseObserve         CyclePhase = "observe"
+	PhasePersistEvidence CyclePhase = "persist_evidence"
+	PhaseEvaluate        CyclePhase = "evaluate"
+	PhaseComplete        CyclePhase = "complete"
+)
 
 // CanonicalJSON returns the single JSON representation used for both machine
 // output and assurance attestation payloads. It intentionally uses compact
@@ -95,18 +115,43 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	if !ok {
 		return nil, fmt.Errorf("runner: no loaded scenario manifest for %s", scenario)
 	}
-	scenarioDigest := manifest.Digest
+	switch manifest.Stapling {
+	case scenarios.StaplingOn, scenarios.StaplingOff, scenarios.StaplingStale:
+	default:
+		return nil, fmt.Errorf("runner: scenario %s has invalid stapling mode %q", scenario, manifest.Stapling)
+	}
+
 	stapling := canary.StaplingMode(manifest.Stapling)
-	cycleID := uuid.New().String()[:8]
+	cycleID := uuid.NewString()
 	hostname := fmt.Sprintf("canary-%s.canary.%s", cycleID, r.Domain)
+	report := &CycleReport{
+		CycleID: cycleID, Scenario: scenario, ScenarioDigest: manifest.Digest,
+		Phase: PhaseIssue, Results: []profiles.Result{},
+	}
+	fail := func(phase CyclePhase, err error) (*CycleReport, error) {
+		report.Phase = phase
+		report.Error = err.Error()
+		return report, err
+	}
 
 	log.Printf("[cycle %s] issuing canary cert for %s", cycleID, hostname)
 	cert, err := r.Issuer.IssueCanary(ctx, hostname)
 	if err != nil {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return nil, fmt.Errorf("runner: issuing canary: %w", err)
+		return fail(PhaseIssue, fmt.Errorf("runner: issuing canary: %w", err))
 	}
 	metrics.CertNotAfter.Set(float64(cert.Cert.NotAfter.Unix()))
+
+	report.Phase = PhasePersistEvidence
+	report.Artifacts, err = r.persistCycleArtifacts(cycleID, map[string]cycleArtifact{
+		"leaf.pem":  {MediaType: "application/x-pem-file", Contents: []byte(cert.CertPEM)},
+		"chain.pem": {MediaType: "application/x-pem-file", Contents: []byte(cert.ChainPEM)},
+	})
+	if err != nil {
+		metrics.CycleTotal.WithLabelValues("error").Inc()
+		return fail(PhasePersistEvidence, fmt.Errorf("runner: persisting cycle artifacts: %w", err))
+	}
+
 	var staple []byte
 	if stapling == canary.StaplingOn || stapling == canary.StaplingStale {
 		// StaplingStale fetches the OCSP response BEFORE revocation and
@@ -115,12 +160,13 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 		// perceived validity.
 		var status int
 		staple, status, err = r.Issuer.FetchOCSPResponse(ctx, r.OCSPURL, cert.Cert, cert.IssuerCert)
-		ocspErr := err
-		if ocspErr != nil {
-			return nil, fmt.Errorf("runner: fetching pre-revocation OCSP staple: %w", ocspErr)
+		if err != nil {
+			metrics.CycleTotal.WithLabelValues("error").Inc()
+			return fail(PhaseCanary, fmt.Errorf("runner: fetching pre-revocation OCSP staple: %w", err))
 		}
 		if status != ocsp.Good {
-			return nil, fmt.Errorf("runner: pre-revocation OCSP status=%d, expected good", status)
+			metrics.CycleTotal.WithLabelValues("error").Inc()
+			return fail(PhaseCanary, fmt.Errorf("runner: pre-revocation OCSP status=%d, expected good", status))
 		}
 		log.Printf("[cycle %s] pre-revocation OCSP status for staple: good", cycleID)
 	}
@@ -134,10 +180,11 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	if bindHost == "" {
 		bindHost = "127.0.0.1"
 	}
+	report.Phase = PhaseCanary
 	srv, err := canary.StartOn(bindHost, hostname, tlsChainPEM, []byte(cert.KeyPEM), staple)
 	if err != nil {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return nil, fmt.Errorf("runner: starting canary server: %w", err)
+		return fail(PhaseCanary, fmt.Errorf("runner: starting canary server: %w", err))
 	}
 	defer srv.Close()
 
@@ -158,25 +205,43 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 		},
 	}
 
-	// Pre-flight validates each scenario-specific BEFORE contract. A strict
-	// client may legitimately reject a missing status before revocation.
+	// Pre-flight validates each scenario-specific BEFORE contract and retains
+	// the exact observation as signed evidence. A strict stapling client may
+	// legitimately reject a missing status before revocation.
+	report.Phase = PhasePreflight
 	log.Printf("[cycle %s] pre-flight: verifying all profiles can reach the canary", cycleID)
-	if err := r.preflight(ctx, target); err != nil {
+	preflight, preflightErr := r.preflight(ctx, target)
+	report.Preflight = preflight
+	if preflightErr != nil {
+		if err := r.persistPreflightEvidence(cycleID, report.Preflight); err != nil {
+			metrics.CycleTotal.WithLabelValues("error").Inc()
+			return fail(PhasePersistEvidence, fmt.Errorf("runner: preflight failed (%v); persisting preflight evidence: %w", preflightErr, err))
+		}
 		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, Error: err.Error()}, err
+		return fail(PhasePreflight, preflightErr)
 	}
 
+	// Do not put evidence I/O between a successful preflight and the revoke
+	// request. The BEFORE observation is retained in memory and persisted after
+	// post-revocation measurement so the causal guard remains temporally tight.
+	report.Phase = PhaseRevoke
 	tReq, tResp, err := r.Issuer.Revoke(ctx, cert.SerialNumber)
 	if err != nil {
+		if persistErr := r.persistPreflightEvidence(cycleID, report.Preflight); persistErr != nil {
+			metrics.CycleTotal.WithLabelValues("error").Inc()
+			return fail(PhasePersistEvidence, fmt.Errorf("runner: revoking canary: %v; persisting preflight evidence: %w", err, persistErr))
+		}
 		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return nil, fmt.Errorf("runner: revoking canary: %w", err)
+		return fail(PhaseRevoke, fmt.Errorf("runner: revoking canary: %w", err))
 	}
 	revokeAckAt := tResp
+	report.RevokeAckAt = revokeAckAt
 	log.Printf("[cycle %s] revoked serial=%s at %s", cycleID, cert.SerialNumber, revokeAckAt.Format(time.RFC3339))
 	timeline := Timeline{RevokeRequestAt: tReq, RevokeAckAt: revokeAckAt}
 
 	// Status channels begin immediately after the issuer acknowledgement. They
 	// never form a global barrier for clients using a different delivery path.
+	report.Phase = PhaseObserve
 	issuerAckReady := closedEvidence()
 	ocspPublishedReady := make(chan struct{})
 	crlPublishedReady := make(chan struct{})
@@ -227,54 +292,73 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 			timeline.CRLFirstRevoked = earliest(timeline.CRLFirstRevoked, result.DecisionAt)
 		}
 	}
-	if stapleErr != nil {
-		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Results: append(oracles, clients...)}, fmt.Errorf("runner: publishing revoked OCSP staple: %w", stapleErr)
-	}
+
 	results := append(oracles, clients...)
+	sortResults(results)
 	timeline.derive()
 	for i := range results {
 		if r.dependsOn(results[i].Scenario, results[i].Profile, scenarios.EvidenceStaplePublished) && !timeline.StaplePublished.IsZero() && !results[i].DecisionAt.IsZero() {
 			results[i].EnforcementLatency = results[i].DecisionAt.Sub(timeline.StaplePublished)
 		}
 	}
-	cycleArtifacts, err := r.persistCycleArtifacts(cycleID, map[string]cycleArtifact{
-		"leaf.pem":  {MediaType: "application/x-pem-file", Contents: []byte(cert.CertPEM)},
-		"chain.pem": {MediaType: "application/x-pem-file", Contents: []byte(cert.ChainPEM)},
-	})
-	if err != nil {
+	report.Timeline = timeline
+	report.Results = results
+
+	report.Phase = PhasePersistEvidence
+	if err := r.persistPreflightEvidence(cycleID, report.Preflight); err != nil {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Results: results}, fmt.Errorf("runner: persisting cycle artifacts: %w", err)
+		return fail(PhasePersistEvidence, fmt.Errorf("runner: persisting preflight evidence: %w", err))
 	}
-	if err := r.persistEvidence(cycleID, results); err != nil {
+	if err := r.persistEvidence(cycleID, report.Results); err != nil {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}, fmt.Errorf("runner: persisting evidence: %w", err)
+		return fail(PhasePersistEvidence, fmt.Errorf("runner: persisting post-revocation evidence: %w", err))
 	}
-	for _, result := range results {
+	if stapleErr != nil {
+		metrics.CycleTotal.WithLabelValues("error").Inc()
+		return fail(PhaseObserve, fmt.Errorf("runner: publishing revoked OCSP staple: %w", stapleErr))
+	}
+
+	report.Phase = PhaseEvaluate
+	for _, result := range report.Results {
 		if result.Decision == profiles.DecisionHarnessError || result.Err != "" {
 			metrics.CycleTotal.WithLabelValues("error").Inc()
-			report := &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}
-			return report, fmt.Errorf("runner: profile %s failed: %s", result.Profile, result.Err)
+			return fail(PhaseEvaluate, fmt.Errorf("runner: profile %s failed: %s", result.Profile, result.Err))
 		}
+	}
+	// A cycle is valid once all required observations and evidence were
+	// collected without a harness error. A regression or policy violation is a
+	// valid security finding, not an invalid trial.
+	report.Valid = true
+	for _, result := range report.Results {
 		if !result.ExpectationMet {
 			metrics.CycleTotal.WithLabelValues("regression").Inc()
-			report := &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}
-			return report, fmt.Errorf("runner: security regression: profile %s produced %s/%s; expected %s", result.Profile, result.Decision, result.Reason, result.ExpectedDecision)
+			return fail(PhaseEvaluate, fmt.Errorf("runner: security regression: profile %s produced %s/%s; expected %s", result.Profile, result.Decision, result.Reason, result.ExpectedDecision))
 		}
 		if !result.PolicyMet {
 			metrics.PolicyViolations.WithLabelValues(result.Profile, string(result.Method), string(result.Scenario), string(result.Decision), string(result.Reason)).Inc()
 			if r.Config.Policy.Enforce {
 				metrics.CycleTotal.WithLabelValues("policy_violation").Inc()
-				report := &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}
-				return report, fmt.Errorf("runner: security policy violation: profile %s produced %s/%s; required %s", result.Profile, result.Decision, result.Reason, result.PolicyDecision)
+				return fail(PhaseEvaluate, fmt.Errorf("runner: security policy violation: profile %s produced %s/%s; required %s", result.Profile, result.Decision, result.Reason, result.PolicyDecision))
 			}
 		}
 	}
 
 	metrics.LastCycleTimestamp.Set(float64(time.Now().Unix()))
 	metrics.CycleTotal.WithLabelValues("ok").Inc()
+	report.Phase = PhaseComplete
+	return report, nil
+}
 
-	return &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}, nil
+func sortResults(results []profiles.Result) {
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Profile != results[j].Profile {
+			return results[i].Profile < results[j].Profile
+		}
+		if results[i].Role != results[j].Role {
+			return results[i].Role < results[j].Role
+		}
+		return results[i].Method < results[j].Method
+	})
 }
 
 func (t *Timeline) derive() {
@@ -348,27 +432,44 @@ func earliest(current, candidate time.Time) time.Time {
 // preflight runs every enabled profile once before revocation and validates
 // its scenario-specific contract. A strict stapling client is expected to
 // reject a missing staple even when the certificate itself is still good.
-func (r *Runner) preflight(ctx context.Context, target profiles.Target) error {
+func (r *Runner) preflight(ctx context.Context, target profiles.Target) ([]profiles.PreflightResult, error) {
+	results := make([]profiles.PreflightResult, 0, len(r.Profiles))
 	for _, p := range r.Profiles {
 		if !r.Config.IsEnabled(p.Name) {
 			continue
 		}
+		contract, ok := r.Scenarios.Contract(target.Scenario, p.Name)
+		if !ok {
+			return results, fmt.Errorf("preflight: profile %s has no expectation for scenario %s", p.Name, target.Scenario)
+		}
+		expectation := contract.Baseline
 		pctx, cancel := context.WithTimeout(ctx, r.Config.TimeoutFor(p.Name))
 		observation, err := p.Probe(pctx, target)
 		cancel()
+		observedAt := time.Now().UTC()
 		if err != nil {
-			return fmt.Errorf("preflight: profile %s errored: %w", p.Name, err)
+			observation.Decision = profiles.DecisionHarnessError
+			observation.Reason = profiles.ReasonHarnessFailure
 		}
-		contract, ok := r.Scenarios.Contract(target.Scenario, p.Name)
-		if !ok {
-			return fmt.Errorf("preflight: profile %s has no expectation for scenario %s", p.Name, target.Scenario)
+		result := profiles.PreflightResult{
+			Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario,
+			Decision: observation.Decision, Reason: observation.Reason,
+			ExpectedDecision: expectation.Before, ExpectedReasons: expectation.BeforeReasons,
+			ExpectationMet: expectation.MatchesBefore(observation), ObservedAt: observedAt, Evidence: observation.Evidence,
 		}
-		expectation := contract.Baseline
-		if !expectation.MatchesBefore(observation) {
-			return fmt.Errorf("preflight: profile %s produced %s/%s, expected %s/%v for scenario %s", p.Name, observation.Decision, observation.Reason, expectation.Before, expectation.BeforeReasons, target.Scenario)
+		if err != nil {
+			result.Err = err.Error()
+		}
+		results = append(results, result)
+		if err != nil {
+			return results, fmt.Errorf("preflight: profile %s errored: %w", p.Name, err)
+		}
+		if !result.ExpectationMet {
+			return results, fmt.Errorf("preflight: profile %s produced %s/%s, expected %s/%v for scenario %s", p.Name, observation.Decision, observation.Reason, expectation.Before, expectation.BeforeReasons, target.Scenario)
 		}
 	}
-	return nil
+	sort.Slice(results, func(i, j int) bool { return results[i].Profile < results[j].Profile })
+	return results, nil
 }
 
 // pollClients waits only on the manifest-declared evidence boundaries for a
@@ -501,11 +602,19 @@ func (r *Runner) pollOne(ctx context.Context, p profiles.Profile, target profile
 	expectation := contract.Baseline
 
 	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return r.exhaustedResult(p, target, revokedAt, expectation, lastObservation, lastErr, attempts, time.Now(), stapling)
+		}
 		attempts++
 		if firstAttempt.IsZero() {
 			firstAttempt = time.Now().UTC()
 		}
-		probeCtx, cancel := context.WithTimeout(ctx, r.Config.TimeoutFor(p.Name))
+		attemptTimeout := r.Config.TimeoutFor(p.Name)
+		if remaining < attemptTimeout {
+			attemptTimeout = remaining
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 		observation, err := p.Probe(probeCtx, target)
 		cancel()
 		if err != nil {
@@ -536,36 +645,22 @@ func (r *Runner) pollOne(ctx context.Context, p profiles.Profile, target profile
 		}
 
 		if time.Now().After(deadline) || (r.Config.MaxAttempts > 0 && attempts >= r.Config.MaxAttempts) {
-			metrics.RecordObservation(p.Name, string(p.Role), string(p.Method), string(target.Scenario), string(observation.Decision), string(observation.Reason))
-			if observation.Decision == profiles.DecisionHarnessError {
-				errText := "profile returned an error outcome"
-				if lastErr != nil {
-					errText = lastErr.Error()
-				}
-				return profiles.Result{
-					Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario,
-					Decision: observation.Decision, Reason: observation.Reason,
-					ExpectedDecision: expectation.After, ExpectedReasons: expectation.AfterReasons, ExpectationMet: false,
-					CertificateSerial: target.CertificateSerial, RevokeAckAt: revokedAt,
-					DecisionAt: now, DecisionLatency: now.Sub(revokedAt), Attempts: attempts,
-					Evidence: observation.Evidence, Err: errText,
-				}
-			}
-			if expectation.After == profiles.DecisionReject && observation.Decision == profiles.DecisionAccept {
-				metrics.SoftfailTotal.WithLabelValues(p.Name, string(p.Method), stapling).Inc()
-			}
-			return profiles.Result{
-				Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario,
-				Decision: observation.Decision, Reason: observation.Reason,
-				ExpectedDecision: expectation.After, ExpectedReasons: expectation.AfterReasons, ExpectationMet: false,
-				CertificateSerial: target.CertificateSerial, RevokeAckAt: revokedAt,
-				DecisionAt: now, DecisionLatency: now.Sub(revokedAt), Attempts: attempts,
-				Evidence: observation.Evidence,
-			}
+			return r.exhaustedResult(p, target, revokedAt, expectation, observation, lastErr, attempts, now, stapling)
 		}
 
+		wait := r.Config.PollInterval
+		if remaining := time.Until(deadline); remaining < wait {
+			wait = remaining
+		}
+		if wait <= 0 {
+			continue
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return profiles.Result{
 				Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario,
 				Decision: profiles.DecisionHarnessError, Reason: profiles.ReasonHarnessFailure,
@@ -573,9 +668,32 @@ func (r *Runner) pollOne(ctx context.Context, p profiles.Profile, target profile
 				CertificateSerial: target.CertificateSerial, RevokeAckAt: revokedAt,
 				Attempts: attempts, Evidence: lastObservation.Evidence, Err: ctx.Err().Error(),
 			}
-		case <-time.After(r.Config.PollInterval):
+		case <-timer.C:
 		}
 	}
+}
+
+func (r *Runner) exhaustedResult(p profiles.Profile, target profiles.Target, revokedAt time.Time, expectation profiles.Expectation, observation profiles.Observation, lastErr error, attempts int, now time.Time, stapling string) profiles.Result {
+	metrics.RecordObservation(p.Name, string(p.Role), string(p.Method), string(target.Scenario), string(observation.Decision), string(observation.Reason))
+	result := profiles.Result{
+		Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario,
+		Decision: observation.Decision, Reason: observation.Reason,
+		ExpectedDecision: expectation.After, ExpectedReasons: expectation.AfterReasons, ExpectationMet: false,
+		CertificateSerial: target.CertificateSerial, RevokeAckAt: revokedAt,
+		DecisionAt: now, DecisionLatency: now.Sub(revokedAt), Attempts: attempts,
+		Evidence: observation.Evidence,
+	}
+	if observation.Decision == profiles.DecisionHarnessError {
+		result.Err = "profile returned an error outcome"
+		if lastErr != nil {
+			result.Err = lastErr.Error()
+		}
+		return result
+	}
+	if expectation.After == profiles.DecisionReject && observation.Decision == profiles.DecisionAccept {
+		metrics.SoftfailTotal.WithLabelValues(p.Name, string(p.Method), stapling).Inc()
+	}
+	return result
 }
 
 func (r *Runner) staplingFor(scenario profiles.Scenario) scenarios.StaplingMode {

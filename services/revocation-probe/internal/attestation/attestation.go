@@ -24,8 +24,8 @@ const Version = "pki-sentinel-assurance/v2"
 type Statement struct {
 	Version         string    `json:"version"`
 	IssuedAt        time.Time `json:"issued_at"`
-	RunID           string    `json:"run_id,omitempty"`
-	ScenarioDigest  string    `json:"scenario_digest,omitempty"`
+	RunID           string    `json:"run_id"`
+	ScenarioDigest  string    `json:"scenario_digest"`
 	PayloadSHA256   string    `json:"payload_sha256"`
 	PublicKeySHA256 string    `json:"public_key_sha256"`
 }
@@ -81,6 +81,10 @@ func SignJSON(privateKeyPEM []byte, payloadJSON []byte, now time.Time) (Envelope
 		return Envelope{}, fmt.Errorf("attestation payload is not valid JSON")
 	}
 	payload := append(json.RawMessage(nil), payloadJSON...)
+	runID, scenarioDigest, err := payloadIdentity(payload)
+	if err != nil {
+		return Envelope{}, err
+	}
 	payloadHash := sha256.Sum256(payload)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 	publicKeyHash := sha256.Sum256(publicKey)
@@ -88,8 +92,8 @@ func SignJSON(privateKeyPEM []byte, payloadJSON []byte, now time.Time) (Envelope
 	statement := Statement{
 		Version:         Version,
 		IssuedAt:        now.UTC(),
-		RunID:           jsonField(payload, "cycle_id"),
-		ScenarioDigest:  jsonField(payload, "scenario_digest"),
+		RunID:           runID,
+		ScenarioDigest:  scenarioDigest,
 		PayloadSHA256:   hex.EncodeToString(payloadHash[:]),
 		PublicKeySHA256: hex.EncodeToString(publicKeyHash[:]),
 	}
@@ -109,6 +113,19 @@ func SignJSON(privateKeyPEM []byte, payloadJSON []byte, now time.Time) (Envelope
 func Verify(publicKeyPEM []byte, envelope Envelope) error {
 	if envelope.Statement.Version != Version {
 		return fmt.Errorf("unsupported attestation version %q", envelope.Statement.Version)
+	}
+	if !json.Valid(envelope.Payload) {
+		return fmt.Errorf("attestation payload is not valid JSON")
+	}
+	runID, scenarioDigest, err := payloadIdentity(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	if envelope.Statement.RunID != runID {
+		return fmt.Errorf("attestation run ID does not match payload cycle_id")
+	}
+	if envelope.Statement.ScenarioDigest != scenarioDigest {
+		return fmt.Errorf("attestation scenario digest does not match payload scenario_digest")
 	}
 	publicKey, err := parsePublicKey(publicKeyPEM)
 	if err != nil {
@@ -136,16 +153,30 @@ func Verify(publicKeyPEM []byte, envelope Envelope) error {
 	return nil
 }
 
-func jsonField(payload json.RawMessage, field string) string {
-	var values map[string]json.RawMessage
-	if json.Unmarshal(payload, &values) != nil {
-		return ""
+func payloadIdentity(payload json.RawMessage) (string, string, error) {
+	var identity struct {
+		CycleID        string `json:"cycle_id"`
+		ScenarioDigest string `json:"scenario_digest"`
 	}
-	var value string
-	if json.Unmarshal(values[field], &value) != nil {
-		return ""
+	if err := json.Unmarshal(payload, &identity); err != nil {
+		return "", "", fmt.Errorf("decode attestation payload identity: %w", err)
 	}
-	return value
+	if identity.CycleID == "" {
+		return "", "", fmt.Errorf("attestation payload cycle_id is required")
+	}
+	if !validScenarioDigest(identity.ScenarioDigest) {
+		return "", "", fmt.Errorf("attestation payload scenario_digest %q is not a canonical SHA-256 digest", identity.ScenarioDigest)
+	}
+	return identity.CycleID, identity.ScenarioDigest, nil
+}
+
+func validScenarioDigest(value string) bool {
+	const prefix = "sha256:"
+	if len(value) != len(prefix)+sha256.Size*2 || value[:len(prefix)] != prefix {
+		return false
+	}
+	decoded, err := hex.DecodeString(value[len(prefix):])
+	return err == nil && len(decoded) == sha256.Size
 }
 
 // ReadPrivateKey reads an Ed25519 PKCS#8 private-key PEM file.

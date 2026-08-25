@@ -100,9 +100,12 @@ profiles:
 		{"unknown reason", strings.Replace(valid, "NO_REVOCATION_CHECK", "MAYBE", 1), "", "unknown reason"},
 		{"missing reasons", strings.Replace(valid, ", reasons: [NO_REVOCATION_CHECK]", "", 1), "", "must declare at least one reason"},
 		{"empty reasons", strings.Replace(valid, "[NO_REVOCATION_CHECK]", "[]", 1), "", "must declare at least one reason"},
+		{"duplicate reasons", strings.Replace(valid, "[NO_REVOCATION_CHECK]", "[NO_REVOCATION_CHECK, NO_REVOCATION_CHECK]", 1), "", "repeats reason"},
+		{"incompatible decision reason", strings.Replace(valid, "decision: ACCEPT, reasons: [NO_REVOCATION_CHECK]", "decision: REJECT, reasons: [NO_REVOCATION_CHECK]", 1), "", "incompatible with reason"},
 		{"invalid evidence", strings.Replace(valid, "issuer_ack", "future_magic", 1), "", "unknown evidence dependency"},
 		{"missing evidence", strings.Replace(valid, "  curl-default: [issuer_ack]\n", "", 1), "", "has no evidence dependencies"},
 		{"empty evidence", strings.Replace(valid, "[issuer_ack]", "[]", 1), "", "empty evidence dependency list"},
+		{"orphan evidence contract", strings.Replace(valid, "  curl-default: [issuer_ack]\n", "  curl-default: [issuer_ack]\n  go-tls-default: [issuer_ack]\n", 1), "", "without a contract"},
 		{"missing execution", strings.Replace(valid, "execution:\n  stapling: off\n", "", 1), "", "invalid execution.stapling"},
 		{"staple dependency without staple execution", strings.Replace(valid, "issuer_ack", "staple_published", 1), "", "requires staple_published"},
 		{"duplicate scenario", valid, valid, "duplicate scenario"},
@@ -124,6 +127,58 @@ profiles:
 				t.Fatalf("LoadDir error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCanonicalDigestTreatsReasonAndDependencyListsAsSets(t *testing.T) {
+	t.Parallel()
+	first := yamlManifest{
+		ID: "stable", Version: Version, Execution: yamlExecution{Stapling: StaplingOn},
+		EvidenceDependencies: map[string][]EvidenceDependency{"curl-default": {EvidenceStaplePublished, EvidenceIssuerAck}},
+		Profiles: map[string]yamlProfileContract{"curl-default": {
+			Baseline: yamlBaseline{
+				Before: yamlExpectation{Decision: "ACCEPT", Reasons: []string{"NO_REVOCATION_CHECK"}},
+				After:  yamlExpectation{Decision: "REJECT", Reasons: []string{"INVALID_STATUS", "REVOKED"}},
+			},
+			Policy: yamlPolicy{After: yamlExpectation{Decision: "REJECT", Reasons: []string{"REVOKED", "INVALID_STATUS"}}},
+		}},
+	}
+	second := first
+	second.EvidenceDependencies = map[string][]EvidenceDependency{"curl-default": {EvidenceIssuerAck, EvidenceStaplePublished}}
+	contract := second.Profiles["curl-default"]
+	contract.Baseline.After.Reasons = []string{"REVOKED", "INVALID_STATUS"}
+	contract.Policy.After.Reasons = []string{"INVALID_STATUS", "REVOKED"}
+	second.Profiles = map[string]yamlProfileContract{"curl-default": contract}
+
+	normalizeManifest(&first)
+	normalizeManifest(&second)
+	firstDigest, err := canonicalDigest(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := canonicalDigest(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDigest != secondDigest {
+		t.Fatalf("semantic-equivalent manifests have different digests: %s != %s", firstDigest, secondDigest)
+	}
+}
+
+func TestValidateEnabledProfilesRequiresPublicationProducer(t *testing.T) {
+	t.Parallel()
+	registry := &Registry{
+		manifests: map[profiles.Scenario]Manifest{"test": {
+			ID: "test",
+			Profiles: map[string]Contract{
+				"curl-default": {Baseline: profiles.Expectation{After: profiles.DecisionReject}},
+			},
+			EvidenceDependencies: map[string][]EvidenceDependency{"curl-default": {EvidenceOCSPPublished}},
+		}},
+		implementations: knownProfiles(profiles.Registry()),
+	}
+	if err := registry.ValidateEnabledProfiles([]string{"curl-default"}); err == nil || !strings.Contains(err.Error(), "no enabled OCSP status oracle") {
+		t.Fatalf("ValidateEnabledProfiles error=%v, want missing publication producer", err)
 	}
 }
 

@@ -31,7 +31,7 @@ flowchart TB
     Drift["Truststore exporter<br/>signed policy + add/remove/change/expiry"]
     Controller -->|canary issue/revoke| IntCA
     Controller --> Oracle
-    Oracle -->|confirm status before clients| Clients
+    Controller -->|manifest-declared evidence barriers| Clients
     Oracle --> Evidence
     Clients --> Evidence
     Evidence --> Metrics1["pki_assurance_* metrics + JSON"]
@@ -72,12 +72,14 @@ Reasons include `REVOKED`, `MISSING_STATUS`, `INVALID_STATUS`,
 successful revocation enforcement.
 
 Status oracles start immediately after issuer acknowledgement. Client
-executors do not wait for an unrelated global oracle barrier: clients with no
-status dependency are measured immediately, and stapled-OCSP clients wait only
-for the renewed staple. The report preserves the acknowledgement timestamp,
-first OCSP/CRL revoked observations, staple publication, and a per-client first
-attempt/decision. It also derives separate propagation, distribution, and
-stapled-client enforcement durations.
+executors do not wait for an unrelated global oracle barrier: every client
+waits only for the evidence dependencies declared by the selected scenario.
+The controller rejects a scenario when an enabled client requires an OCSP/CRL
+publication boundary without an enabled status-oracle producer. The report
+retains each profile's pre-revocation BEFORE observation, the acknowledgement
+timestamp, first OCSP/CRL revoked observations, staple publication, and a
+per-client first attempt/decision. It also derives separate propagation,
+distribution, and stapled-client enforcement durations.
 
 Certificate material, OCSP/CRL DER, command stdout/stderr, client versions,
 TLS backends, exit codes, and content hashes are retained as access-controlled,
@@ -86,10 +88,12 @@ included in the JSON report; unbounded data remains excluded from Prometheus
 labels.
 
 An optional Ed25519 attestation envelope signs a to-be-signed statement that
-binds the exact report SHA-256, issue time, run ID, scenario digest, and
-public-key SHA-256. It can be verified without the controller. A local file
-key is only a demo integration; production keys belong behind an external KMS
-or HSM signing boundary.
+binds the exact report SHA-256, issue time, non-empty run ID, canonical scenario
+digest, and public-key SHA-256. Verification re-derives the run ID and scenario
+digest from the signed payload and rejects statement/payload disagreement. It
+can be verified without the controller. A local file key is only a demo
+integration; production keys belong behind an external KMS or HSM signing
+boundary.
 
 Scenario contracts are versioned YAML manifests in
 `services/revocation-probe/scenarios/`. They are decoded with a strict schema,

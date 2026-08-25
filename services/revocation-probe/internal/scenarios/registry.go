@@ -97,7 +97,8 @@ type Manifest struct {
 
 // Registry provides scenario contracts and their digests by stable ID.
 type Registry struct {
-	manifests map[profiles.Scenario]Manifest
+	manifests       map[profiles.Scenario]Manifest
+	implementations map[string]profiles.Profile
 }
 
 // New constructs an in-memory registry for focused runner tests. Production
@@ -145,14 +146,40 @@ func parseExpectation(value yamlExpectation, required bool, field string) (profi
 		return profiles.Expectation{}, fmt.Errorf("%s must declare at least one reason", field)
 	}
 	reasons := make([]profiles.Reason, 0, len(value.Reasons))
+	seen := make(map[profiles.Reason]struct{}, len(value.Reasons))
 	for _, raw := range value.Reasons {
 		reason, ok := validReason(raw)
 		if !ok {
 			return profiles.Expectation{}, fmt.Errorf("%s has unknown reason %q", field, raw)
 		}
+		if _, duplicate := seen[reason]; duplicate {
+			return profiles.Expectation{}, fmt.Errorf("%s repeats reason %q", field, raw)
+		}
+		if !reasonCompatible(decision, reason) {
+			return profiles.Expectation{}, fmt.Errorf("%s decision %q is incompatible with reason %q", field, decision, reason)
+		}
+		seen[reason] = struct{}{}
 		reasons = append(reasons, reason)
 	}
+	sort.Slice(reasons, func(i, j int) bool { return reasons[i] < reasons[j] })
 	return profiles.Expectation{After: decision, AfterReasons: reasons}, nil
+}
+
+func reasonCompatible(decision profiles.Decision, reason profiles.Reason) bool {
+	switch reason {
+	case profiles.ReasonStatusGood, profiles.ReasonNoRevocationCheck:
+		return decision == profiles.DecisionAccept
+	case profiles.ReasonNetworkFailure, profiles.ReasonTLSFailure:
+		return decision == profiles.DecisionInconclusive
+	case profiles.ReasonHarnessFailure:
+		return decision == profiles.DecisionHarnessError
+	case profiles.ReasonRevoked, profiles.ReasonExpired, profiles.ReasonMissingStatus, profiles.ReasonInvalidStatus,
+		profiles.ReasonStaleStatus, profiles.ReasonFutureStatus, profiles.ReasonMissingFreshness,
+		profiles.ReasonUnknownStatus, profiles.ReasonClientPolicy:
+		return decision == profiles.DecisionReject
+	default:
+		return false
+	}
 }
 
 func parseBaseline(value yamlBaseline, field string) (profiles.Expectation, error) {
@@ -205,15 +232,28 @@ func canonicalDigest(manifest yamlManifest) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
-func knownProfiles(values []profiles.Profile) map[string]struct{} {
-	known := make(map[string]struct{}, len(values))
+func knownProfiles(values []profiles.Profile) map[string]profiles.Profile {
+	known := make(map[string]profiles.Profile, len(values))
 	for _, profile := range values {
-		known[profile.Name] = struct{}{}
+		known[profile.Name] = profile
 	}
 	return known
 }
 
-func build(raw yamlManifest, profilesByName map[string]struct{}) (Manifest, error) {
+func normalizeManifest(raw *yamlManifest) {
+	for profile, dependencies := range raw.EvidenceDependencies {
+		sort.Slice(dependencies, func(i, j int) bool { return dependencies[i] < dependencies[j] })
+		raw.EvidenceDependencies[profile] = dependencies
+	}
+	for profile, contract := range raw.Profiles {
+		sort.Strings(contract.Baseline.Before.Reasons)
+		sort.Strings(contract.Baseline.After.Reasons)
+		sort.Strings(contract.Policy.After.Reasons)
+		raw.Profiles[profile] = contract
+	}
+}
+
+func build(raw yamlManifest, profilesByName map[string]profiles.Profile) (Manifest, error) {
 	if raw.ID == "" {
 		return Manifest{}, fmt.Errorf("id is required")
 	}
@@ -228,6 +268,7 @@ func build(raw yamlManifest, profilesByName map[string]struct{}) (Manifest, erro
 	default:
 		return Manifest{}, fmt.Errorf("scenario %q has invalid execution.stapling %q", raw.ID, raw.Execution.Stapling)
 	}
+	normalizeManifest(&raw)
 	digest, err := canonicalDigest(raw)
 	if err != nil {
 		return Manifest{}, err
@@ -253,8 +294,12 @@ func build(raw yamlManifest, profilesByName map[string]struct{}) (Manifest, erro
 		}
 	}
 	for profile, dependencies := range raw.EvidenceDependencies {
-		if _, ok := profilesByName[profile]; !ok {
+		implementation, ok := profilesByName[profile]
+		if !ok {
 			return Manifest{}, fmt.Errorf("scenario %q has evidence dependencies for unknown profile %q", raw.ID, profile)
+		}
+		if _, ok := raw.Profiles[profile]; !ok {
+			return Manifest{}, fmt.Errorf("scenario %q has evidence dependencies for profile %q without a contract", raw.ID, profile)
 		}
 		seen := make(map[EvidenceDependency]struct{}, len(dependencies))
 		if len(dependencies) == 0 {
@@ -268,6 +313,9 @@ func build(raw yamlManifest, profilesByName map[string]struct{}) (Manifest, erro
 				return Manifest{}, fmt.Errorf("scenario %q profile %q repeats evidence dependency %q", raw.ID, profile, dependency)
 			}
 			seen[dependency] = struct{}{}
+			if implementation.Role == profiles.RoleStatusOracle && dependency != EvidenceIssuerAck {
+				return Manifest{}, fmt.Errorf("scenario %q status oracle %q cannot wait for publication dependency %q", raw.ID, profile, dependency)
+			}
 		}
 		if _, requiresStaple := seen[EvidenceStaplePublished]; requiresStaple && raw.Execution.Stapling != StaplingOn {
 			return Manifest{}, fmt.Errorf("scenario %q profile %q requires staple_published but execution.stapling is %q", raw.ID, profile, raw.Execution.Stapling)
@@ -288,7 +336,7 @@ func LoadDir(directory string, implementations []profiles.Profile) (*Registry, e
 		return nil, fmt.Errorf("no scenario manifests in %s", directory)
 	}
 	known := knownProfiles(implementations)
-	registry := &Registry{manifests: make(map[profiles.Scenario]Manifest, len(paths))}
+	registry := &Registry{manifests: make(map[profiles.Scenario]Manifest, len(paths)), implementations: known}
 	for _, path := range paths {
 		raw, err := decode(path)
 		if err != nil {
@@ -353,12 +401,41 @@ func (r *Registry) Dependencies(scenario profiles.Scenario, profile string) ([]E
 // ValidateEnabledProfiles requires the baseline and policy contract for every
 // enabled implementation in every loaded scenario.
 func (r *Registry) ValidateEnabledProfiles(enabled []string) error {
+	enabledSet := make(map[string]struct{}, len(enabled))
+	for _, profile := range enabled {
+		enabledSet[profile] = struct{}{}
+	}
 	for scenario, manifest := range r.manifests {
 		for _, profile := range enabled {
 			if _, ok := manifest.Profiles[profile]; !ok {
 				return fmt.Errorf("scenario %q has no baseline contract for enabled profile %q", scenario, profile)
 			}
+			for _, dependency := range manifest.EvidenceDependencies[profile] {
+				switch dependency {
+				case EvidenceOCSPPublished:
+					if !r.hasEnabledProducer(manifest, enabledSet, profiles.MethodOCSPDirect) {
+						return fmt.Errorf("scenario %q profile %q requires ocsp_published but no enabled OCSP status oracle produces it", scenario, profile)
+					}
+				case EvidenceCRLPublished:
+					if !r.hasEnabledProducer(manifest, enabledSet, profiles.MethodCRL) {
+						return fmt.Errorf("scenario %q profile %q requires crl_published but no enabled CRL status oracle produces it", scenario, profile)
+					}
+				}
+			}
 		}
 	}
 	return nil
+}
+
+func (r *Registry) hasEnabledProducer(manifest Manifest, enabled map[string]struct{}, method profiles.CheckMethod) bool {
+	for name := range manifest.Profiles {
+		if _, ok := enabled[name]; !ok {
+			continue
+		}
+		implementation, ok := r.implementations[name]
+		if ok && implementation.Role == profiles.RoleStatusOracle && implementation.Method == method {
+			return true
+		}
+	}
+	return false
 }

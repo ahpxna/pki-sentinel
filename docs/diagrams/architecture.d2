@@ -23,7 +23,7 @@ assurance: Assurance plane (the differentiator) {
 
   controller -> fault_proxy
   fault_proxy -> oracles: OCSP fault path
-  oracles -> clients: status confirmed
+  controller -> clients: manifest evidence barriers
   oracles -> evidence
   clients -> evidence
 }

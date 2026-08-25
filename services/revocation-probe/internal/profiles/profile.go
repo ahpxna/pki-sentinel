@@ -135,6 +135,25 @@ type Observation struct {
 	Evidence CommandEvidence `json:"evidence,omitempty"`
 }
 
+// PreflightResult is the durable BEFORE-contract observation for one profile.
+// Keeping it in the cycle report lets an external verifier confirm the causal
+// guard that the same client/oracle was in its expected pre-revocation state
+// before the certificate was revoked.
+type PreflightResult struct {
+	Profile          string          `json:"profile"`
+	Role             Role            `json:"role"`
+	Method           CheckMethod     `json:"method"`
+	Scenario         Scenario        `json:"scenario"`
+	Decision         Decision        `json:"decision"`
+	Reason           Reason          `json:"reason"`
+	ExpectedDecision Decision        `json:"expected_decision"`
+	ExpectedReasons  []Reason        `json:"expected_reasons,omitempty"`
+	ExpectationMet   bool            `json:"expectation_met"`
+	ObservedAt       time.Time       `json:"observed_at"`
+	Evidence         CommandEvidence `json:"evidence,omitempty"`
+	Err              string          `json:"error,omitempty"`
+}
+
 // Expectation defines the decision a profile should produce before and after
 // revocation for a scenario. It is used both as a pre-flight invariant and as
 // a security-regression assertion.

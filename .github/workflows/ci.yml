@@ -174,23 +174,30 @@ jobs:
         run: |
           # The image ENTRYPOINT is `probe`; docker compose run appends the
           # command below to that entrypoint, so pass only the subcommand.
-          if ! docker compose run --rm --no-deps -T --use-aliases revocation-probe \
+          cycle_status=0
+          docker compose run --rm --no-deps -T --use-aliases revocation-probe \
             run --once --output json \
               --attestation-key /run/attestation/assurance.key \
-              --attestation-out /run/attestation/last-cycle.attestation.json > /tmp/cycle.json 2> /tmp/attested-cycle.stderr; then
+              --attestation-out /run/attestation/last-cycle.attestation.json > /tmp/cycle.json 2> /tmp/attested-cycle.stderr || cycle_status=$?
+          # A failed-but-reportable cycle is still evidence. Copy its report,
+          # public key, and attestation out of the Compose volume before the
+          # step exits so invalid trials remain inspectable in CI artifacts.
+          docker compose run --rm --no-deps -T --entrypoint cat revocation-probe /run/attestation/assurance.pub > /tmp/assurance.pub || true
+          docker compose run --rm --no-deps -T --entrypoint cat revocation-probe /run/attestation/last-cycle.attestation.json > /tmp/last-cycle.attestation.json || true
+          if (( cycle_status != 0 )); then
             cycle_diagnostics="$(tail -n 80 /tmp/attested-cycle.stderr)"
             cycle_diagnostics="${cycle_diagnostics//'%'/'%25'}"
             cycle_diagnostics="${cycle_diagnostics//$'\r'/'%0D'}"
             cycle_diagnostics="${cycle_diagnostics//$'\n'/'%0A'}"
             echo "::error file=services/revocation-probe/cmd/probe/main.go,line=1,title=Attested integration cycle failed::${cycle_diagnostics}"
+            cat /tmp/cycle.json || true
+            echo
             cat /tmp/attested-cycle.stderr
-            exit 1
+            exit "$cycle_status"
           fi
           docker compose run --rm --no-deps -T revocation-probe \
             attest verify --public-key /run/attestation/assurance.pub \
               --input /run/attestation/last-cycle.attestation.json
-          docker compose run --rm --no-deps -T --entrypoint cat revocation-probe /run/attestation/assurance.pub > /tmp/assurance.pub
-          docker compose run --rm --no-deps -T --entrypoint cat revocation-probe /run/attestation/last-cycle.attestation.json > /tmp/last-cycle.attestation.json
           cat /tmp/cycle.json
           echo
       - name: go test -tags=integration
@@ -226,7 +233,14 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: upload logs on failure
         if: failure()
-        run: mkdir -p artifacts && docker compose logs > artifacts/compose-logs.txt
+        run: |
+          mkdir -p artifacts
+          docker compose logs > artifacts/compose-logs.txt
+          for file in /tmp/cycle.json /tmp/last-cycle.attestation.json /tmp/assurance.pub /tmp/attested-cycle.stderr; do
+            if [[ -f "$file" ]]; then
+              cp "$file" artifacts/
+            fi
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: failure()
         with:

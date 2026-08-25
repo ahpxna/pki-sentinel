@@ -23,7 +23,7 @@ func TestPersistEvidenceStoresContentAddressedArtifact(t *testing.T) {
 	if len(results[0].Evidence.Artifacts) != 1 || len(results[0].Evidence.RawArtifacts) != 0 {
 		t.Fatalf("unexpected evidence: %#v", results[0].Evidence)
 	}
-	path := filepath.Join(dir, "run-1", "curl-default", "stderr.txt")
+	path := filepath.Join(dir, "run-1", "curl-default", "post_revocation", "stderr.txt")
 	contents, err := os.ReadFile(path)
 	if err != nil || string(contents) != "certificate revoked" {
 		t.Fatalf("artifact = %q, err=%v", contents, err)
@@ -62,9 +62,9 @@ func TestPersistCycleArtifactsStoresCertificateMaterial(t *testing.T) {
 	}
 }
 
-func TestPersistEvidenceTightensExistingPermissions(t *testing.T) {
+func TestPersistEvidenceRejectsOverwrite(t *testing.T) {
 	dir := t.TempDir()
-	directory := filepath.Join(dir, "run-existing", "curl-default")
+	directory := filepath.Join(dir, "run-existing", "curl-default", "post_revocation")
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -86,8 +86,8 @@ func TestPersistEvidenceTightensExistingPermissions(t *testing.T) {
 			Name: "stderr.txt", MediaType: "text/plain", Data: "new",
 		}}},
 	}}
-	if err := r.persistEvidence("run-existing", results); err != nil {
-		t.Fatal(err)
+	if err := r.persistEvidence("run-existing", results); err == nil {
+		t.Fatal("persistEvidence overwrote an existing evidence artifact")
 	}
 
 	dirInfo, err := os.Stat(directory)
@@ -101,7 +101,66 @@ func TestPersistEvidenceTightensExistingPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fileInfo.Mode().Perm(); got != 0o600 {
-		t.Fatalf("existing artifact mode = %o, want 600", got)
+	if got := fileInfo.Mode().Perm(); got != 0o640 {
+		t.Fatalf("existing artifact mode changed after rejected overwrite: %o", got)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "old" {
+		t.Fatalf("existing artifact was overwritten: %q", contents)
+	}
+}
+
+func TestPersistPreflightEvidenceUsesSeparatePhasePath(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{EvidenceDir: dir}
+	results := []profiles.PreflightResult{{
+		Profile:  "curl-default",
+		Evidence: profiles.CommandEvidence{RawArtifacts: []profiles.RawArtifact{{Name: "stderr.txt", MediaType: "text/plain", Data: "before"}}},
+	}}
+	if err := r.persistPreflightEvidence("run-preflight", results); err != nil {
+		t.Fatal(err)
+	}
+	if len(results[0].Evidence.Artifacts) != 1 {
+		t.Fatalf("unexpected preflight evidence: %#v", results[0].Evidence)
+	}
+	if got := results[0].Evidence.Artifacts[0].Path; got != "run-preflight/curl-default/pre_revocation/stderr.txt" {
+		t.Fatalf("preflight artifact path=%q", got)
+	}
+}
+
+func TestPersistEvidenceRejectsSanitizedNameCollision(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{EvidenceDir: dir}
+	results := []profiles.Result{{
+		Profile: "curl-default",
+		Evidence: profiles.CommandEvidence{RawArtifacts: []profiles.RawArtifact{
+			{Name: "first/stderr.txt", Data: "one"},
+			{Name: "second/stderr.txt", Data: "two"},
+		}},
+	}}
+	if err := r.persistEvidence("run-collision", results); err == nil {
+		t.Fatal("persistEvidence accepted artifact names that collide after sanitization")
+	}
+}
+
+func TestPersistCycleArtifactsIsDeterministicAndNonOverwriting(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{EvidenceDir: dir}
+	artifacts := map[string]cycleArtifact{
+		"z.pem": {MediaType: "application/x-pem-file", Contents: []byte("z")},
+		"a.pem": {MediaType: "application/x-pem-file", Contents: []byte("a")},
+	}
+	references, err := r.persistCycleArtifacts("run-order", artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if references[0].Path != "run-order/a.pem" || references[1].Path != "run-order/z.pem" {
+		t.Fatalf("cycle artifact order is not deterministic: %#v", references)
+	}
+	if _, err := r.persistCycleArtifacts("run-order", map[string]cycleArtifact{"a.pem": artifacts["a.pem"]}); err == nil {
+		t.Fatal("persistCycleArtifacts overwrote an existing artifact")
 	}
 }

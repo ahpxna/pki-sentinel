@@ -75,6 +75,44 @@ func TestRunOnceRejectsUnknownScenarioBeforeIssuing(t *testing.T) {
 	}
 }
 
+func TestRunOnceRejectsInvalidManifestStaplingBeforeIssuing(t *testing.T) {
+	scenarioID := profiles.Scenario("invalid")
+	r := &Runner{Scenario: scenarioID, Scenarios: scenarios.New(scenarios.Manifest{ID: scenarioID, Digest: "sha256:test", Stapling: scenarios.StaplingMode("maybe")})}
+	if report, err := r.RunOnce(context.Background()); err == nil || report != nil {
+		t.Fatalf("RunOnce report=%v err=%v, want invalid-stapling failure before issuer use", report, err)
+	}
+}
+
+func TestPreflightRetainsBeforeObservationEvidence(t *testing.T) {
+	r := &Runner{Config: &config.Config{Profiles: []config.ProfileConfig{{Name: "client", Enabled: true, Timeout: time.Second}}}, Scenarios: testScenarios("client")}
+	r.Profiles = []profiles.Profile{{
+		Name: "client", Role: profiles.RoleClientExecutor, Method: profiles.MethodNone,
+		Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
+			return profiles.Observation{
+				Decision: profiles.DecisionAccept, Reason: profiles.ReasonStatusGood,
+				Evidence: profiles.CommandEvidence{RawArtifacts: []profiles.RawArtifact{{Name: "before.txt", Data: "reachable"}}},
+			}, nil
+		},
+	}}
+	manifest, _ := r.Scenarios.Manifest("test")
+	contract := manifest.Profiles["client"]
+	contract.Baseline.Before = profiles.DecisionAccept
+	contract.Baseline.BeforeReasons = []profiles.Reason{profiles.ReasonStatusGood}
+	manifest.Profiles["client"] = contract
+	r.Scenarios = scenarios.New(manifest)
+
+	results, err := r.preflight(context.Background(), profiles.Target{Scenario: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !results[0].ExpectationMet || results[0].ObservedAt.IsZero() {
+		t.Fatalf("unexpected preflight result: %#v", results)
+	}
+	if len(results[0].Evidence.RawArtifacts) != 1 || results[0].Evidence.RawArtifacts[0].Data != "reachable" {
+		t.Fatalf("preflight evidence was discarded: %#v", results[0].Evidence)
+	}
+}
+
 func TestPollClientsWaitsForManifestEvidenceDependencies(t *testing.T) {
 	scenarioID := profiles.Scenario("custom_manifest_scenario")
 	contracts := map[string]scenarios.Contract{
@@ -136,5 +174,37 @@ func TestTimelineDerivesSeparatePropagationBoundaries(t *testing.T) {
 	timeline.derive()
 	if timeline.OCSPPropagationLatency != time.Second || timeline.CRLPropagationLatency != 2*time.Second || timeline.StapleDistributionLatency != 3*time.Second {
 		t.Fatalf("unexpected derived timeline: %#v", timeline)
+	}
+}
+
+func TestPollOneBoundsAttemptByRemainingMaxWait(t *testing.T) {
+	r := &Runner{Config: &config.Config{
+		PollInterval: time.Second,
+		MaxWait:      30 * time.Millisecond,
+		MaxAttempts:  10,
+		Profiles:     []config.ProfileConfig{{Name: "slow", Enabled: true, Timeout: time.Second}},
+	}, Scenario: "test", Scenarios: testScenarios("slow")}
+	p := profiles.Profile{
+		Name: "slow", Role: profiles.RoleClientExecutor, Method: profiles.MethodNone,
+		Probe: func(ctx context.Context, _ profiles.Target) (profiles.Observation, error) {
+			<-ctx.Done()
+			return profiles.Observation{}, ctx.Err()
+		},
+	}
+	started := time.Now()
+	result := r.pollOne(context.Background(), p, profiles.Target{Scenario: "test"}, time.Now())
+	if elapsed := time.Since(started); elapsed > 150*time.Millisecond {
+		t.Fatalf("pollOne exceeded MaxWait by profile timeout: %s", elapsed)
+	}
+	if result.Decision != profiles.DecisionHarnessError || result.Err == "" {
+		t.Fatalf("unexpected bounded-timeout result: %#v", result)
+	}
+}
+
+func TestSortResultsIsDeterministic(t *testing.T) {
+	results := []profiles.Result{{Profile: "z"}, {Profile: "a"}, {Profile: "m"}}
+	sortResults(results)
+	if results[0].Profile != "a" || results[1].Profile != "m" || results[2].Profile != "z" {
+		t.Fatalf("results are not sorted deterministically: %#v", results)
 	}
 }

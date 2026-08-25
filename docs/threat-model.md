@@ -19,7 +19,7 @@ table and the README's "Production notes" — read all three together.
 
 | Threat | STRIDE | Mitigation in this repo |
 |---|---|---|
-| Attacker spoofs a "rejected" result to hide a real soft-fail | Spoofing / Tampering | Decision and reason are separate; network/TLS failures are inconclusive; preflight enforces scenario contracts; status oracles confirm revocation before clients execute; command output hashes and environment fingerprints are retained in JSON. |
+| Attacker spoofs a "rejected" result to hide a real soft-fail | Spoofing / Tampering | Decision and reason are separate; network/TLS failures are inconclusive; signed pre-revocation observations prove the BEFORE contract; each client waits only for its manifest-declared evidence boundary; command output hashes and environment fingerprints are retained in JSON. |
 | Probe container compromised, used as a network pivot | Elevation of Privilege | Neither continuous probe nor one-shot chaos runner receives an added Linux capability. The fault proxy listens on loopback and forwards only the configured OCSP path. |
 | Fault injection silently corrupts unrelated measurements | Tampering (data integrity) | Latency is applied inside a responder-only reverse proxy. Issuer API, CRL, and TLS target traffic bypass it; every sweep resets proxy delay to zero. |
 | Attacker installs, removes, or replaces a root | Spoofing / Tampering | The exporter detects SPKI additions, removals, same-subject key changes, and expiry against a signed baseline. The demo signer key is not mounted into the exporter; production must keep it offline and pin the verification root. |

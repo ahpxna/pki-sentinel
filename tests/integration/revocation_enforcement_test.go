@@ -42,6 +42,9 @@ type cycleReport struct {
 	CycleID        string   `json:"cycle_id"`
 	Scenario       string   `json:"scenario"`
 	ScenarioDigest string   `json:"scenario_digest"`
+	Valid          bool     `json:"valid"`
+	Phase          string   `json:"phase"`
+	Preflight      []result `json:"preflight"`
 	Results        []result `json:"results"`
 }
 
@@ -116,6 +119,17 @@ func TestRevocationEnforcement(t *testing.T) {
 	}
 	if !validScenarioDigest(report.ScenarioDigest) {
 		t.Fatalf("probe report has invalid scenario_digest %q", report.ScenarioDigest)
+	}
+	if !report.Valid || report.Phase != "complete" {
+		t.Fatalf("probe cycle validity=%v phase=%q, want valid complete cycle", report.Valid, report.Phase)
+	}
+	if len(report.Preflight) != len(report.Results) {
+		t.Fatalf("preflight observations=%d, post-revocation results=%d", len(report.Preflight), len(report.Results))
+	}
+	for _, before := range report.Preflight {
+		if before.Error != "" || !before.ExpectationMet {
+			t.Errorf("preflight %s did not satisfy BEFORE contract: decision=%s reason=%s error=%s", before.Profile, before.Decision, before.Reason, before.Error)
+		}
 	}
 
 	oracle := findResult(t, report, "openssl-ocsp-direct")
