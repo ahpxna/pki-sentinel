@@ -1,6 +1,7 @@
 package attestation
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -9,11 +10,6 @@ import (
 	"testing"
 	"time"
 )
-
-type cyclePayload struct {
-	CycleID        string `json:"cycle_id"`
-	ScenarioDigest string `json:"scenario_digest"`
-}
 
 func TestSignAndVerify(t *testing.T) {
 	t.Parallel()
@@ -32,7 +28,7 @@ func TestSignAndVerify(t *testing.T) {
 	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
 	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
 
-	envelope, err := Sign(privatePEM, cyclePayload{CycleID: "cycle-1", ScenarioDigest: "sha256:scenario"}, time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC))
+	envelope, err := SignJSON(privatePEM, []byte(`{"cycle_id":"cycle-1","scenario_digest":"sha256:scenario"}`), time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +42,7 @@ func TestSignAndVerify(t *testing.T) {
 	if err := Verify(publicPEM, envelope); err == nil {
 		t.Fatal("verify accepted a modified payload")
 	}
-	envelope, err = Sign(privatePEM, map[string]string{"decision": "REJECT"}, time.Now())
+	envelope, err = SignJSON(privatePEM, []byte(`{"decision":"REJECT"}`), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +54,7 @@ func TestSignAndVerify(t *testing.T) {
 
 func TestSignRejectsNonEd25519Key(t *testing.T) {
 	t.Parallel()
-	if _, err := Sign([]byte("not a key"), map[string]string{}, time.Now()); err == nil {
+	if _, err := SignJSON([]byte("not a key"), []byte(`{}`), time.Now()); err == nil {
 		t.Fatal("Sign accepted an invalid key")
 	}
 }
@@ -80,13 +76,21 @@ func TestMarshalEnvelopeRoundTripPreservesSignedPayload(t *testing.T) {
 	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
 	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
 
-	envelope, err := Sign(privatePEM, cyclePayload{CycleID: "cycle-roundtrip", ScenarioDigest: "sha256:scenario"}, time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC))
+	payload := []byte(`{"cycle_id":"cycle-roundtrip", "scenario_digest":"sha256:scenario"}`)
+	envelope, err := SignJSON(privatePEM, payload, time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if string(envelope.Payload) != string(payload) {
+		t.Fatalf("signed payload changed bytes: got %q want %q", envelope.Payload, payload)
 	}
 	wire, err := MarshalEnvelope(envelope)
 	if err != nil {
 		t.Fatal(err)
+	}
+	wantFragment := append([]byte(`"payload":`), payload...)
+	if !bytes.Contains(wire, wantFragment) {
+		t.Fatalf("serialized envelope reformatted signed payload: %s", wire)
 	}
 	var decoded Envelope
 	if err := json.Unmarshal(wire, &decoded); err != nil {
@@ -94,5 +98,21 @@ func TestMarshalEnvelopeRoundTripPreservesSignedPayload(t *testing.T) {
 	}
 	if err := Verify(publicPEM, decoded); err != nil {
 		t.Fatalf("verify serialized envelope: %v", err)
+	}
+}
+
+func TestSignJSONRejectsInvalidPayload(t *testing.T) {
+	t.Parallel()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
+	if _, err := SignJSON(privatePEM, []byte(`{"broken":`), time.Now()); err == nil {
+		t.Fatal("SignJSON accepted invalid JSON")
 	}
 }

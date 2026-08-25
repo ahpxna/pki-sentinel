@@ -182,6 +182,7 @@ jobs:
           docker compose run --rm --no-deps -T --entrypoint cat revocation-probe /run/attestation/assurance.pub > /tmp/assurance.pub
           docker compose run --rm --no-deps -T --entrypoint cat revocation-probe /run/attestation/last-cycle.attestation.json > /tmp/last-cycle.attestation.json
           cat /tmp/cycle.json
+          echo
       - name: go test -tags=integration
         working-directory: tests/integration
         env:
@@ -211,6 +212,7 @@ jobs:
           echo '### Detection table' >> "$GITHUB_STEP_SUMMARY"
           echo '```json' >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/cycle.json >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: upload logs on failure
         if: failure()

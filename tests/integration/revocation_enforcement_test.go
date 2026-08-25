@@ -10,6 +10,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -163,6 +164,15 @@ func TestAttestationBindsScenarioDigest(t *testing.T) {
 	var envelope attestationEnvelope
 	if err := json.Unmarshal(contents, &envelope); err != nil {
 		t.Fatalf("parsing attestation: %v", err)
+	}
+	if reportPath := os.Getenv("PROBE_REPORT"); reportPath != "" {
+		reportBytes, err := os.ReadFile(reportPath)
+		if err != nil {
+			t.Fatalf("reading PROBE_REPORT %s for attestation comparison: %v", reportPath, err)
+		}
+		if !bytes.Equal(reportBytes, envelope.Payload) {
+			t.Fatalf("stdout report and signed payload differ byte-for-byte\nreport:  %q\npayload: %q", reportBytes, envelope.Payload)
+		}
 	}
 	if envelope.Statement.ScenarioDigest != report.ScenarioDigest {
 		t.Fatalf("attestation digest=%q, report digest=%q", envelope.Statement.ScenarioDigest, report.ScenarioDigest)

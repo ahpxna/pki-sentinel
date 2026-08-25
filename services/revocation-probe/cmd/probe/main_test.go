@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/runner"
+)
 
 func TestSplitHostPort(t *testing.T) {
 	tests := []struct {
@@ -30,5 +35,31 @@ func TestSplitHostPort(t *testing.T) {
 				t.Fatalf("got host=%q port=%d err=%v", host, port, err)
 			}
 		})
+	}
+}
+
+func TestWriteReportJSONUsesCanonicalBytes(t *testing.T) {
+	t.Parallel()
+	report := &runner.CycleReport{CycleID: "cycle-1"}
+	canonicalJSON, err := report.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var oneShot bytes.Buffer
+	if err := writeReport(&oneShot, report, "json", canonicalJSON, false); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(oneShot.Bytes(), canonicalJSON) {
+		t.Fatalf("one-shot stdout differs from canonical report: got %q want %q", oneShot.Bytes(), canonicalJSON)
+	}
+
+	var stream bytes.Buffer
+	if err := writeReport(&stream, report, "json", canonicalJSON, true); err != nil {
+		t.Fatal(err)
+	}
+	wantStream := append(append([]byte(nil), canonicalJSON...), '\n')
+	if !bytes.Equal(stream.Bytes(), wantStream) {
+		t.Fatalf("stream framing mismatch: got %q want %q", stream.Bytes(), wantStream)
 	}
 }

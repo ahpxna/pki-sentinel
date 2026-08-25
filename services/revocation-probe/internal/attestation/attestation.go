@@ -39,42 +39,57 @@ type Envelope struct {
 	Signature string          `json:"signature"`
 }
 
-// MarshalEnvelope serializes an envelope without reformatting Payload.
-//
-// PayloadSHA256 binds the exact bytes produced by Sign. Using
-// json.MarshalIndent on Envelope would pretty-print the embedded RawMessage
-// and change those bytes, making an otherwise valid envelope fail Verify after
-// it is written to disk and read back.
+// MarshalEnvelope serializes the outer envelope while preserving Payload
+// byte-for-byte. encoding/json compacts json.RawMessage values during Marshal,
+// so marshaling Envelope directly would make payload integrity depend on the
+// payload already being compact. Building the three-field envelope around the
+// validated raw payload keeps the signed representation exact by construction.
 func MarshalEnvelope(envelope Envelope) ([]byte, error) {
-	contents, err := json.Marshal(envelope)
-	if err != nil {
-		return nil, fmt.Errorf("encode attestation envelope: %w", err)
+	if !json.Valid(envelope.Payload) {
+		return nil, fmt.Errorf("attestation payload is not valid JSON")
 	}
+	statement, err := json.Marshal(envelope.Statement)
+	if err != nil {
+		return nil, fmt.Errorf("encode attestation statement: %w", err)
+	}
+	signature, err := json.Marshal(envelope.Signature)
+	if err != nil {
+		return nil, fmt.Errorf("encode attestation signature: %w", err)
+	}
+
+	contents := make([]byte, 0, len(statement)+len(envelope.Payload)+len(signature)+40)
+	contents = append(contents, `{"statement":`...)
+	contents = append(contents, statement...)
+	contents = append(contents, `,"payload":`...)
+	contents = append(contents, envelope.Payload...)
+	contents = append(contents, `,"signature":`...)
+	contents = append(contents, signature...)
+	contents = append(contents, '}')
 	return contents, nil
 }
 
-// Sign serializes payload once and signs a statement that binds its digest,
-// run identity, scenario, issue time, and public-key identity. The resulting
-// envelope is suitable for append-only evidence storage or publication
-// alongside the corresponding public key.
-func Sign(privateKeyPEM []byte, payload any, now time.Time) (Envelope, error) {
+// SignJSON signs an already-serialized JSON payload without re-encoding it.
+// The caller owns payload canonicalization; this function validates and copies
+// the exact bytes before hashing them so stdout, archived evidence, and the
+// signed payload can share one representation.
+func SignJSON(privateKeyPEM []byte, payloadJSON []byte, now time.Time) (Envelope, error) {
 	privateKey, err := parsePrivateKey(privateKeyPEM)
 	if err != nil {
 		return Envelope{}, err
 	}
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return Envelope{}, fmt.Errorf("marshal attestation payload: %w", err)
+	if !json.Valid(payloadJSON) {
+		return Envelope{}, fmt.Errorf("attestation payload is not valid JSON")
 	}
-	payloadHash := sha256.Sum256(payloadJSON)
+	payload := append(json.RawMessage(nil), payloadJSON...)
+	payloadHash := sha256.Sum256(payload)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 	publicKeyHash := sha256.Sum256(publicKey)
 
 	statement := Statement{
 		Version:         Version,
 		IssuedAt:        now.UTC(),
-		RunID:           jsonField(payloadJSON, "cycle_id"),
-		ScenarioDigest:  jsonField(payloadJSON, "scenario_digest"),
+		RunID:           jsonField(payload, "cycle_id"),
+		ScenarioDigest:  jsonField(payload, "scenario_digest"),
 		PayloadSHA256:   hex.EncodeToString(payloadHash[:]),
 		PublicKeySHA256: hex.EncodeToString(publicKeyHash[:]),
 	}
@@ -84,7 +99,7 @@ func Sign(privateKeyPEM []byte, payload any, now time.Time) (Envelope, error) {
 	}
 	return Envelope{
 		Statement: statement,
-		Payload:   payloadJSON,
+		Payload:   payload,
 		Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, toBeSigned)),
 	}, nil
 }

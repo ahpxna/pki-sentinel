@@ -6,9 +6,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/url"
@@ -178,12 +178,18 @@ func cmdRun(args []string) {
 	runCycle := func() error {
 		report, err := r.RunOnce(ctx)
 		if report != nil {
+			canonicalJSON, marshalErr := report.CanonicalJSON()
+			if marshalErr != nil {
+				return marshalErr
+			}
 			if len(attestationPrivateKey) > 0 {
-				if signErr := writeAttestation(*attestationOut, attestationPrivateKey, report); signErr != nil {
+				if signErr := writeAttestation(*attestationOut, attestationPrivateKey, canonicalJSON); signErr != nil {
 					return fmt.Errorf("write assurance attestation: %w", signErr)
 				}
 			}
-			printReport(report, *output)
+			if printErr := writeReport(os.Stdout, report, *output, canonicalJSON, !*once); printErr != nil {
+				return fmt.Errorf("write cycle report: %w", printErr)
+			}
 		}
 		return err
 	}
@@ -212,8 +218,8 @@ func cmdRun(args []string) {
 	}
 }
 
-func writeAttestation(path string, privateKey []byte, report *runner.CycleReport) error {
-	envelope, err := attestation.Sign(privateKey, report, time.Now())
+func writeAttestation(path string, privateKey, canonicalJSON []byte) error {
+	envelope, err := attestation.SignJSON(privateKey, canonicalJSON, time.Now())
 	if err != nil {
 		return err
 	}
@@ -244,19 +250,33 @@ func writeAttestation(path string, privateKey []byte, report *runner.CycleReport
 	return nil
 }
 
-func printReport(report *runner.CycleReport, format string) {
+func writeReport(w io.Writer, report *runner.CycleReport, format string, canonicalJSON []byte, delimitJSON bool) error {
 	if format == "json" {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(report)
-		return
+		if _, err := w.Write(canonicalJSON); err != nil {
+			return err
+		}
+		// A newline is stream framing, not part of the canonical report. The
+		// one-shot path omits it so captured stdout is byte-identical to the
+		// signed attestation payload; continuous mode needs it between cycles.
+		if delimitJSON {
+			_, err := w.Write([]byte{'\n'})
+			return err
+		}
+		return nil
 	}
-	fmt.Printf("cycle %s  scenario=%s  revoke_ack_at=%s\n", report.CycleID, report.Scenario, report.RevokeAckAt.Format(time.RFC3339))
-	fmt.Printf("%-22s %-16s %-14s %-18s %-20s %-8s %s\n", "PROFILE", "ROLE", "METHOD", "DECISION", "REASON", "MATCH", "LATENCY")
+	if _, err := fmt.Fprintf(w, "cycle %s  scenario=%s  revoke_ack_at=%s\n", report.CycleID, report.Scenario, report.RevokeAckAt.Format(time.RFC3339)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "%-22s %-16s %-14s %-18s %-20s %-8s %s\n", "PROFILE", "ROLE", "METHOD", "DECISION", "REASON", "MATCH", "LATENCY"); err != nil {
+		return err
+	}
 	for _, res := range report.Results {
 		latency := res.DecisionLatency.Round(time.Millisecond).String()
-		fmt.Printf("%-22s %-16s %-14s %-18s %-20s %-8t %s\n", res.Profile, res.Role, res.Method, res.Decision, res.Reason, res.ExpectationMet, latency)
+		if _, err := fmt.Fprintf(w, "%-22s %-16s %-14s %-18s %-20s %-8t %s\n", res.Profile, res.Role, res.Method, res.Decision, res.Reason, res.ExpectationMet, latency); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // --- check (standalone single-profile invocation) -----------------------

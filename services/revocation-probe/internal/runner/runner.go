@@ -6,6 +6,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -54,6 +55,21 @@ type CycleReport struct {
 	Artifacts      []profiles.Artifact `json:"artifacts,omitempty"`
 	Results        []profiles.Result   `json:"results"`
 	Error          string              `json:"error,omitempty"`
+}
+
+// CanonicalJSON returns the single JSON representation used for both machine
+// output and assurance attestation payloads. It intentionally uses compact
+// encoding/json output with no trailing newline so callers can preserve these
+// exact bytes across stdout capture, hashing, signing, and verification.
+func (r *CycleReport) CanonicalJSON() ([]byte, error) {
+	if r == nil {
+		return nil, fmt.Errorf("runner: cannot serialize a nil cycle report")
+	}
+	contents, err := json.Marshal(r)
+	if err != nil {
+		return nil, fmt.Errorf("runner: marshal cycle report: %w", err)
+	}
+	return contents, nil
 }
 
 // Timeline preserves measurement boundaries instead of overloading one
