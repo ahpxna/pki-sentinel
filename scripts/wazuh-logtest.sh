@@ -47,7 +47,23 @@ run_fixture() {
       fi
       rm -f /var/ossec/queue/db/.template.db
       cp -a /wazuh-config-mount/etc/. /var/ossec/etc/
-      exec /var/ossec/bin/wazuh-logtest
+      /var/ossec/bin/wazuh-analysisd -f &
+      analysisd_pid=$!
+      cleanup() {
+        kill "${analysisd_pid}" 2>/dev/null || true
+        wait "${analysisd_pid}" 2>/dev/null || true
+      }
+      trap cleanup EXIT
+      for _ in $(seq 1 100); do
+        [[ -S /var/ossec/queue/sockets/analysis ]] && break
+        if ! kill -0 "${analysisd_pid}" 2>/dev/null; then
+          wait "${analysisd_pid}"
+          exit 1
+        fi
+        sleep 0.1
+      done
+      [[ -S /var/ossec/queue/sockets/analysis ]]
+      /var/ossec/bin/wazuh-logtest
     ' < "${fixture}" 2>&1)"; then
     printf '%s\n' "${output}" >&2
     echo "wazuh-logtest failed for ${fixture}" >&2
