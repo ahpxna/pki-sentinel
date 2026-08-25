@@ -200,7 +200,7 @@ func Serve(ctx context.Context, address, profileName string) error {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	err := server.ListenAndServe()
+	err = server.ListenAndServe()
 	if err == http.ErrServerClosed {
 		return nil
 	}

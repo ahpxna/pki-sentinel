@@ -20,8 +20,13 @@ services:
     profiles: ["wazuh"]
     networks: [pki-sentinel]
     volumes:
-      - ./observability/wazuh/decoders/vault_audit.xml:/var/ossec/etc/decoders/vault_audit.xml:ro
-      - ./observability/wazuh/rules/local_rules.xml:/var/ossec/etc/rules/local_rules.xml:ro
+      # Wazuh 4.8.x seeds /var/ossec/etc during container initialization. A
+      # direct nested bind mount under /var/ossec/etc makes that directory look
+      # pre-populated, so the image skips restoring its default ossec.conf.
+      # Custom configuration must enter through the image's supported staging
+      # directory and is copied into /var/ossec only after defaults are seeded.
+      - ./observability/wazuh/decoders/vault_audit.xml:/wazuh-config-mount/etc/decoders/vault_audit.xml:ro
+      - ./observability/wazuh/rules/local_rules.xml:/wazuh-config-mount/etc/rules/local_rules.xml:ro
       - ./.data/vault-logs:/var/ossec/logs/vault:ro
       - ./.data/wazuh/var-ossec:/var/ossec/data
     environment:
