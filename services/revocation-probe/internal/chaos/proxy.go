@@ -188,12 +188,12 @@ func (p *LatencyProxy) URL() string { return p.baseURL }
 // SetDelay changes the delay applied to requests that arrive afterward.
 // A zero delay restores pass-through behavior, which gives Sweep a reliable
 // cleanup operation even when its context is cancelled.
-func (p *LatencyProxy) SetDelay(delay time.Duration) {
+func (p *LatencyProxy) SetDelay(delay time.Duration) error {
 	mode := FaultDelay
 	if delay == 0 {
 		mode = FaultPassThrough
 	}
-	p.SetFault(Fault{Mode: mode, Delay: delay})
+	return p.SetFault(Fault{Mode: mode, Delay: delay})
 }
 
 // SetFault changes the responder behavior for requests that arrive afterward.
@@ -225,7 +225,7 @@ func (p *LatencyProxy) Close(ctx context.Context) error {
 
 // delayController captures the only fault capability required by Sweep.
 type delayController interface {
-	SetDelay(time.Duration)
+	SetDelay(time.Duration) error
 }
 
 // TrialOutcome keeps an experiment failure separate from a broken harness.
@@ -295,7 +295,11 @@ func SweepDetailed(ctx context.Context, controller delayController, delaysMS []i
 	if trials < 1 {
 		return DetailedSweep{}, fmt.Errorf("chaos: trials must be at least 1")
 	}
-	defer controller.SetDelay(0)
+	defer func() {
+		if err := controller.SetDelay(0); err != nil {
+			log.Printf("chaos: failed to reset responder delay: %v", err)
+		}
+	}()
 
 	result := DetailedSweep{Stats: make(map[int]SweepStats, len(delaysMS))}
 	for _, delay := range delaysMS {
@@ -308,7 +312,9 @@ func SweepDetailed(ctx context.Context, controller delayController, delaysMS []i
 		default:
 		}
 
-		controller.SetDelay(time.Duration(delay) * time.Millisecond)
+		if err := controller.SetDelay(time.Duration(delay) * time.Millisecond); err != nil {
+			return result, fmt.Errorf("chaos: setting delay %dms: %w", delay, err)
+		}
 		stats := SweepStats{}
 		for range trials {
 			mode := FaultDelay

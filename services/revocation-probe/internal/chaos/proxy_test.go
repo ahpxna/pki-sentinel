@@ -32,7 +32,9 @@ func TestLatencyProxyScopesDelayToAllowedPath(t *testing.T) {
 		}
 	})
 
-	proxy.SetDelay(80 * time.Millisecond)
+	if err := proxy.SetDelay(80 * time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
 	started := time.Now()
 	response, err := http.Get(proxy.URL() + "/v1/pki_int/ocsp") // #nosec G107 -- local test server
 	if err != nil {
@@ -129,6 +131,9 @@ func TestSetFaultRejectsInvalidConfiguration(t *testing.T) {
 	if err := proxy.SetFault(Fault{Mode: FaultDelay, Delay: -time.Second}); err == nil {
 		t.Fatal("SetFault accepted a negative delay")
 	}
+	if err := proxy.SetDelay(-time.Second); err == nil {
+		t.Fatal("SetDelay accepted a negative delay")
+	}
 }
 
 type recordingController struct {
@@ -136,10 +141,11 @@ type recordingController struct {
 	delays []time.Duration
 }
 
-func (c *recordingController) SetDelay(delay time.Duration) {
+func (c *recordingController) SetDelay(delay time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.delays = append(c.delays, delay)
+	return nil
 }
 
 func TestSweepRecordsFailuresAndResetsDelay(t *testing.T) {
@@ -170,6 +176,25 @@ func TestSweepRejectsInvalidInputs(t *testing.T) {
 	}
 	if _, err := Sweep(context.Background(), controller, []int{-1}, 1, trial); err == nil || !strings.Contains(err.Error(), "negative") {
 		t.Fatalf("expected delay validation error, got %v", err)
+	}
+}
+
+type rejectingController struct{}
+
+func (rejectingController) SetDelay(delay time.Duration) error {
+	if delay == 0 {
+		return nil
+	}
+	return errors.New("fault controller rejected delay")
+}
+
+func TestSweepDetailedPropagatesControllerFailure(t *testing.T) {
+	t.Parallel()
+	_, err := SweepDetailed(context.Background(), rejectingController{}, []int{10}, 1, func(context.Context, int) (TrialOutcome, error) {
+		return TrialOutcome{Valid: true}, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "setting delay") {
+		t.Fatalf("expected controller error, got %v", err)
 	}
 }
 

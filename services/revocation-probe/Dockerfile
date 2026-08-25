@@ -4,7 +4,7 @@
 # python3. See docs/adr/0006-alpine-over-distroless-for-probe.md and
 # SECURITY.md for the reasoning and the compensating controls (non-root
 # user, no added capability in the continuous service, image scanned in CI).
-FROM golang:1.26.6-alpine3.23@sha256:e57c41c1d5864341031181b0db34b9a537bb5773eb6428e4e5bdaea0f9135406 AS builder
+FROM golang:1.26.7-alpine3.23@sha256:b17af760035fc2f338eed92d448a6c67f2d45438844fc6c60678fa5f99e44b57 AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

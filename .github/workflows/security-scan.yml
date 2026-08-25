@@ -25,11 +25,20 @@ jobs:
           echo "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e  gitleaks.tar.gz" | sha256sum --check --strict
           tar -xzf gitleaks.tar.gz gitleaks
           sudo install gitleaks /usr/local/bin/gitleaks
-      - name: verify detector with a synthetic credential
+      - name: verify detector with a deterministic synthetic credential
         run: |
-          printf 'token = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"\n' > /tmp/gitleaks-smoke.txt
-          if gitleaks detect --no-git --source /tmp/gitleaks-smoke.txt --redact; then
-            echo "gitleaks failed its synthetic-credential smoke test" >&2
+          cat > /tmp/gitleaks-smoke.toml <<'EOF'
+          title = "PKI Sentinel Gitleaks smoke"
+
+          [[rules]]
+          id = "pki-sentinel-ci-smoke"
+          description = "deterministic detector self-test"
+          regex = '''PKI_SENTINEL_SYNTHETIC_SECRET_[A-Z0-9]{32}'''
+          EOF
+          mkdir -p /tmp/gitleaks-smoke
+          printf 'PKI_SENTINEL_SYNTHETIC_SECRET_0123456789ABCDEF0123456789ABCDEF\n' > /tmp/gitleaks-smoke/input.txt
+          if gitleaks detect --config /tmp/gitleaks-smoke.toml --no-git --source /tmp/gitleaks-smoke --redact; then
+            echo "gitleaks failed its deterministic detector smoke test" >&2
             exit 1
           fi
       - name: scan repository history
@@ -40,6 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: trivy filesystem scan
+        id: trivy_fs
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           scan-type: fs
@@ -49,6 +59,15 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           limit-severities-for-sarif: true
+      - name: show trivy filesystem findings on failure
+        if: steps.trivy_fs.outcome == 'failure'
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL
+          exit-code: "0"
+          format: table
       - uses: github/codeql-action/upload-sarif@4c0873ef8656cb3c50b3f42fb63bc1ade0cfa827 # v4
         if: always()
         with:
@@ -73,6 +92,7 @@ jobs:
       - name: build image
         run: docker build -t pki-sentinel/${{ matrix.service }}:ci ${{ matrix.context }}
       - name: trivy image scan
+        id: trivy_image
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           image-ref: pki-sentinel/${{ matrix.service }}:ci
@@ -82,6 +102,15 @@ jobs:
           format: sarif
           output: trivy-image-${{ matrix.service }}.sarif
           limit-severities-for-sarif: true
+      - name: show trivy image findings on failure
+        if: steps.trivy_image.outcome == 'failure'
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: pki-sentinel/${{ matrix.service }}:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+          format: table
       - uses: github/codeql-action/upload-sarif@4c0873ef8656cb3c50b3f42fb63bc1ade0cfa827 # v4
         if: always()
         with:

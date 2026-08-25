@@ -1,5 +1,5 @@
 <!-- Custom decoder for raw lines emitted by Vault's JSON file audit device. -->
 <decoder name="vault-audit">
-  <prematch>^\{</prematch>
+  <prematch type="pcre2">^\{</prematch>
   <plugin_decoder>JSON_Decoder</plugin_decoder>
 </decoder>

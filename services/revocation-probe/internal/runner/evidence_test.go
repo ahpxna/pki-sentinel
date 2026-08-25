@@ -28,6 +28,13 @@ func TestPersistEvidenceStoresContentAddressedArtifact(t *testing.T) {
 	if err != nil || string(contents) != "certificate revoked" {
 		t.Fatalf("artifact = %q, err=%v", contents, err)
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("artifact mode = %o, want 600", got)
+	}
 }
 
 func TestPersistCycleArtifactsStoresCertificateMaterial(t *testing.T) {
@@ -45,5 +52,12 @@ func TestPersistCycleArtifactsStoresCertificateMaterial(t *testing.T) {
 	want := sha256.Sum256([]byte("leaf"))
 	if references[0].SHA256 != hex.EncodeToString(want[:]) {
 		t.Fatalf("hash = %s", references[0].SHA256)
+	}
+	info, err := os.Stat(filepath.Join(dir, "run-2", "leaf.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("cycle artifact mode = %o, want 600", got)
 	}
 }

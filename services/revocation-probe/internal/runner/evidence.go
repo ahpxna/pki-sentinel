@@ -20,28 +20,39 @@ func (r *Runner) persistEvidence(cycleID string, results []profiles.Result) erro
 		return fmt.Errorf("evidence directory is required")
 	}
 	for i := range results {
-		evidence := &results[i].Evidence
-		for _, raw := range evidence.RawArtifacts {
-			contents, err := rawArtifactBytes(raw)
-			if err != nil {
-				return fmt.Errorf("decode %s/%s: %w", results[i].Profile, raw.Name, err)
-			}
-			digest := sha256.Sum256(contents)
-			name := safeArtifactName(raw.Name)
-			directory := filepath.Join(r.EvidenceDir, cycleID, results[i].Profile)
-			if err := os.MkdirAll(directory, 0o750); err != nil {
-				return fmt.Errorf("create evidence directory: %w", err)
-			}
-			path := filepath.Join(directory, name)
-			if err := os.WriteFile(path, contents, 0o640); err != nil {
-				return fmt.Errorf("write evidence %s: %w", path, err)
-			}
-			evidence.Artifacts = append(evidence.Artifacts, profiles.Artifact{
-				Path: filepath.ToSlash(filepath.Join(cycleID, results[i].Profile, name)), SHA256: hex.EncodeToString(digest[:]), MediaType: raw.MediaType,
-			})
+		// i is produced by ranging over this exact slice, so the access is
+		// bounds-safe. Keeping the indexed access on one reviewed line also
+		// avoids repeatedly indexing the slice while evidence is mutated.
+		result := &results[i] //nolint:gosec // G602: i is the range index for results.
+		if err := r.persistResultEvidence(cycleID, result); err != nil {
+			return err
 		}
-		evidence.RawArtifacts = nil
 	}
+	return nil
+}
+
+func (r *Runner) persistResultEvidence(cycleID string, result *profiles.Result) error {
+	evidence := &result.Evidence
+	for _, raw := range evidence.RawArtifacts {
+		contents, err := rawArtifactBytes(raw)
+		if err != nil {
+			return fmt.Errorf("decode %s/%s: %w", result.Profile, raw.Name, err)
+		}
+		digest := sha256.Sum256(contents)
+		name := safeArtifactName(raw.Name)
+		directory := filepath.Join(r.EvidenceDir, cycleID, result.Profile)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return fmt.Errorf("create evidence directory: %w", err)
+		}
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			return fmt.Errorf("write evidence %s: %w", path, err)
+		}
+		evidence.Artifacts = append(evidence.Artifacts, profiles.Artifact{
+			Path: filepath.ToSlash(filepath.Join(cycleID, result.Profile, name)), SHA256: hex.EncodeToString(digest[:]), MediaType: raw.MediaType,
+		})
+	}
+	evidence.RawArtifacts = nil
 	return nil
 }
 
@@ -58,13 +69,13 @@ func (r *Runner) persistCycleArtifacts(cycleID string, artifacts map[string]cycl
 		return nil, fmt.Errorf("evidence directory is required")
 	}
 	directory := filepath.Join(r.EvidenceDir, cycleID)
-	if err := os.MkdirAll(directory, 0o750); err != nil {
+	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, fmt.Errorf("create cycle evidence directory: %w", err)
 	}
 	references := make([]profiles.Artifact, 0, len(artifacts))
 	for name, artifact := range artifacts {
 		name = safeArtifactName(name)
-		if err := os.WriteFile(filepath.Join(directory, name), artifact.Contents, 0o640); err != nil {
+		if err := os.WriteFile(filepath.Join(directory, name), artifact.Contents, 0o600); err != nil {
 			return nil, fmt.Errorf("write cycle artifact %s: %w", name, err)
 		}
 		digest := sha256.Sum256(artifact.Contents)

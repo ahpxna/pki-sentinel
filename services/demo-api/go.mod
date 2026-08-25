@@ -1,6 +1,6 @@
 module github.com/ahpxna/pki-sentinel/services/demo-api
 
-go 1.26
+go 1.26.7
 
 require (
 	github.com/hashicorp/vault/api v1.23.0
