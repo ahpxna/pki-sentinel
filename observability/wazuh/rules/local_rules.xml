@@ -29,10 +29,7 @@
   <rule id="100102" level="12">
     <decoded_as>json</decoded_as>
     <field name="request.path">^pki_root/</field>
-    <!-- Wazuh 4.8.2 rejects request.operation as a field selector in this
-         ruleset (analysisd error 5107). Match the operation in raw JSON while
-         retaining request.path as the structural selector. -->
-    <regex type="pcre2">&quot;operation&quot;\s*:\s*&quot;(?:create|update|delete)&quot;</regex>
+    <field name="request.operation">^(create|update|delete)$</field>
     <description>Root CA mount written — should essentially never happen after initial bootstrap.</description>
     <group>pki_root_write,</group>
   </rule>
@@ -55,7 +52,7 @@
   <rule id="100105" level="10">
     <decoded_as>json</decoded_as>
     <field name="request.path">^sys/policy</field>
-    <regex type="pcre2">&quot;operation&quot;\s*:\s*&quot;(?:create|update|delete)&quot;</regex>
+    <field name="request.operation">^(create|update|delete)$</field>
     <description>Vault policy modified.</description>
     <group>pki_policy_change,</group>
   </rule>
