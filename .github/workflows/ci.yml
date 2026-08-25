@@ -162,7 +162,7 @@ jobs:
           (cd services/truststore-drift-agent && go build -o bin/truststore-drift-agent .)
       - name: run one probe cycle
         run: |
-          if ! docker compose exec -T revocation-probe \
+          if ! docker compose run --rm --no-deps -T --use-aliases revocation-probe \
             probe run --once --output json \
               --attestation-key /run/attestation/assurance.key \
               --attestation-out /run/attestation/last-cycle.attestation.json > /tmp/cycle.json 2> /tmp/attested-cycle.stderr; then
@@ -174,11 +174,11 @@ jobs:
             cat /tmp/attested-cycle.stderr
             exit 1
           fi
-          docker compose exec -T revocation-probe \
+          docker compose run --rm --no-deps -T revocation-probe \
             probe attest verify --public-key /run/attestation/assurance.pub \
               --input /run/attestation/last-cycle.attestation.json
-          docker compose exec -T revocation-probe cat /run/attestation/assurance.pub > /tmp/assurance.pub
-          docker compose exec -T revocation-probe cat /run/attestation/last-cycle.attestation.json > /tmp/last-cycle.attestation.json
+          docker compose run --rm --no-deps -T --entrypoint cat revocation-probe /run/attestation/assurance.pub > /tmp/assurance.pub
+          docker compose run --rm --no-deps -T --entrypoint cat revocation-probe /run/attestation/last-cycle.attestation.json > /tmp/last-cycle.attestation.json
           cat /tmp/cycle.json
       - name: go test -tags=integration
         working-directory: tests/integration
