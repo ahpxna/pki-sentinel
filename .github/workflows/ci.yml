@@ -202,4 +202,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: cp .env.example .env
       - name: validate the revocation audit fixture
-        run: ./scripts/wazuh-logtest.sh
+        run: |
+          set -o pipefail
+          if ! ./scripts/wazuh-logtest.sh 2>&1 | tee /tmp/wazuh-logtest.log; then
+            wazuh_diagnostics="$(tail -n 120 /tmp/wazuh-logtest.log)"
+            wazuh_diagnostics="${wazuh_diagnostics//'%'/'%25'}"
+            wazuh_diagnostics="${wazuh_diagnostics//$'\r'/'%0D'}"
+            wazuh_diagnostics="${wazuh_diagnostics//$'\n'/'%0A'}"
+            echo "::error file=scripts/wazuh-logtest.sh,line=1,title=Wazuh fixture failed::${wazuh_diagnostics}"
+            exit 1
+          fi

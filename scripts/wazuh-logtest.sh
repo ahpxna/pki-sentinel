@@ -27,6 +27,7 @@ run_fixture() {
   # its exception files and runtime directories, then layer local rules on
   # top. Starting the complete manager service is unnecessary for an isolated
   # rule session.
+  # shellcheck disable=SC2016 # The quoted program is evaluated by Bash inside the container.
   if ! output="$("${COMPOSE[@]}" run --rm --no-deps -T \
     --entrypoint /bin/bash wazuh-manager -euc '
       source /permanent_data.env
