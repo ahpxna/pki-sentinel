@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Start a real Wazuh manager, wait for wazuh-analysisd, and verify every local
-# PKI Sentinel rule against a regression fixture. Running wazuh-logtest as the
-# container entrypoint is insufficient because it needs the analysis daemon.
+# Verify every local Wazuh decoder and rule against a regression fixture.
+# wazuh-logtest loads the same rule and decoder engine as Wazuh analysisd, but
+# runs in an isolated session. This avoids making rule tests depend on the
+# manager, indexer, and Filebeat startup sequence.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,42 +17,19 @@ if [[ -f "${REPO_ROOT}/.env" ]]; then
 fi
 
 cd "${REPO_ROOT}"
-manager_was_running=0
-if "${COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx 'wazuh-manager'; then
-  manager_was_running=1
-fi
-cleanup() {
-  if [[ "${manager_was_running}" -eq 0 ]]; then
-    "${COMPOSE[@]}" rm -sf wazuh-manager >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT
-
-"${COMPOSE[@]}" up -d --no-deps wazuh-manager
-
-analysisd_ready=0
-for _ in $(seq 1 60); do
-  if "${COMPOSE[@]}" exec -T wazuh-manager /var/ossec/bin/wazuh-control status 2>/dev/null | grep -q 'wazuh-analysisd is running'; then
-    analysisd_ready=1
-    break
-  fi
-  if ! "${COMPOSE[@]}" ps --status running wazuh-manager | grep -q wazuh-manager; then
-    break
-  fi
-  sleep 1
-done
-if [[ "${analysisd_ready}" -ne 1 ]]; then
-  echo "wazuh-analysisd did not become ready" >&2
-  "${COMPOSE[@]}" ps --all >&2 || true
-  "${COMPOSE[@]}" logs --no-color --tail=120 wazuh-manager >&2 || true
-  exit 1
-fi
 
 run_fixture() {
   local expected_rule="$1"
   local fixture="$2"
   local output
-  if ! output="$("${COMPOSE[@]}" exec -T wazuh-manager /var/ossec/bin/wazuh-logtest < "${fixture}" 2>&1)"; then
+  # Override the image entrypoint so the test uses the manager's built-in
+  # logtest tool directly. The active rule locations are mounted only for this
+  # ephemeral container; the normal Wazuh service continues to use its staged
+  # configuration mount during runtime initialization.
+  if ! output="$("${COMPOSE[@]}" run --rm --no-deps -T \
+    --volume "${REPO_ROOT}/observability/wazuh/decoders/vault_audit.xml:/var/ossec/etc/decoders/vault_audit.xml:ro" \
+    --volume "${REPO_ROOT}/observability/wazuh/rules/local_rules.xml:/var/ossec/etc/rules/local_rules.xml:ro" \
+    --entrypoint /var/ossec/bin/wazuh-logtest wazuh-manager < "${fixture}" 2>&1)"; then
     printf '%s\n' "${output}" >&2
     echo "wazuh-logtest failed for ${fixture}" >&2
     return 1

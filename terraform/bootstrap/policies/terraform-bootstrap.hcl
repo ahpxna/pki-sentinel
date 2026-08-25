@@ -9,6 +9,13 @@ path "sys/mounts/*" {
   capabilities = ["create", "read", "update", "delete", "list", "sudo"]
 }
 
+# The Vault Terraform provider resolves a logical path to its mount before it
+# reads or manages that path. This endpoint exposes mount metadata only; it
+# does not grant access to secrets stored by other mounts.
+path "sys/internal/ui/mounts/*" {
+  capabilities = ["read"]
+}
+
 path "sys/auth" {
   capabilities = ["read"]
 }
