@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/canary"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/config"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/scenarios"
@@ -20,7 +19,11 @@ func testScenarios(names ...string) *scenarios.Registry {
 			Policy:   profiles.Expectation{After: profiles.DecisionReject, AfterReasons: []profiles.Reason{profiles.ReasonRevoked}},
 		}
 	}
-	return scenarios.New(scenarios.Manifest{ID: profiles.ScenarioRevokedStaple, Digest: "sha256:test", Profiles: contracts})
+	dependencies := make(map[string][]scenarios.EvidenceDependency, len(names))
+	for _, name := range names {
+		dependencies[name] = []scenarios.EvidenceDependency{scenarios.EvidenceIssuerAck}
+	}
+	return scenarios.New(scenarios.Manifest{ID: profiles.Scenario("test"), Digest: "sha256:test", Stapling: scenarios.StaplingOn, Profiles: contracts, EvidenceDependencies: dependencies})
 }
 
 func TestPollOneHonorsMaxAttempts(t *testing.T) {
@@ -28,7 +31,7 @@ func TestPollOneHonorsMaxAttempts(t *testing.T) {
 		PollInterval: time.Millisecond,
 		MaxWait:      time.Second,
 		MaxAttempts:  2,
-	}, Scenarios: testScenarios("unexpected-accept")}
+	}, Scenario: profiles.Scenario("test"), Scenarios: testScenarios("unexpected-accept")}
 	p := profiles.Profile{
 		Name:   "unexpected-accept",
 		Role:   profiles.RoleClientExecutor,
@@ -37,7 +40,7 @@ func TestPollOneHonorsMaxAttempts(t *testing.T) {
 			return profiles.Observation{Decision: profiles.DecisionAccept, Reason: profiles.ReasonStatusGood}, nil
 		},
 	}
-	target := profiles.Target{Scenario: profiles.ScenarioRevokedStaple}
+	target := profiles.Target{Scenario: profiles.Scenario("test")}
 	result := r.pollOne(context.Background(), p, target, time.Now())
 	if result.Decision != profiles.DecisionAccept || result.ExpectationMet || result.Attempts != 2 {
 		t.Fatalf("unexpected result: %+v", result)
@@ -49,7 +52,7 @@ func TestPollOneDoesNotConvertHarnessErrorToSoftFail(t *testing.T) {
 		PollInterval: time.Millisecond,
 		MaxWait:      time.Second,
 		MaxAttempts:  1,
-	}, Scenarios: testScenarios("broken")}
+	}, Scenario: profiles.Scenario("test"), Scenarios: testScenarios("broken")}
 	p := profiles.Profile{
 		Name:   "broken",
 		Role:   profiles.RoleStatusOracle,
@@ -58,43 +61,45 @@ func TestPollOneDoesNotConvertHarnessErrorToSoftFail(t *testing.T) {
 			return profiles.Observation{Decision: profiles.DecisionHarnessError, Reason: profiles.ReasonHarnessFailure}, errors.New("invalid harness configuration")
 		},
 	}
-	target := profiles.Target{Scenario: profiles.ScenarioRevokedStaple}
+	target := profiles.Target{Scenario: profiles.Scenario("test")}
 	result := r.pollOne(context.Background(), p, target, time.Now())
 	if result.Decision != profiles.DecisionHarnessError || result.Err == "" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 }
 
-func TestScenarioForStapling(t *testing.T) {
-	cases := map[canary.StaplingMode]profiles.Scenario{
-		canary.StaplingOn:    profiles.ScenarioRevokedStaple,
-		canary.StaplingOff:   profiles.ScenarioMissingStaple,
-		canary.StaplingStale: profiles.ScenarioCachedGoodStaple,
-	}
-	for mode, expected := range cases {
-		if got := scenarioForStapling(mode); got != expected {
-			t.Errorf("mode %s: got %s, expected %s", mode, got, expected)
-		}
+func TestRunOnceRejectsUnknownScenarioBeforeIssuing(t *testing.T) {
+	r := &Runner{Scenario: profiles.Scenario("missing"), Scenarios: testScenarios("unused")}
+	if report, err := r.RunOnce(context.Background()); err == nil || report != nil {
+		t.Fatalf("RunOnce report=%v err=%v, want missing-scenario failure before issuer use", report, err)
 	}
 }
 
-func TestPollClientsDoesNotWaitForStapleBeforeRunningIndependentClient(t *testing.T) {
+func TestPollClientsWaitsForManifestEvidenceDependencies(t *testing.T) {
+	scenarioID := profiles.Scenario("custom_manifest_scenario")
+	contracts := map[string]scenarios.Contract{
+		"independent":    {Baseline: profiles.Expectation{After: profiles.DecisionReject, AfterReasons: []profiles.Reason{profiles.ReasonRevoked}}, Policy: profiles.Expectation{After: profiles.DecisionReject, AfterReasons: []profiles.Reason{profiles.ReasonRevoked}}},
+		"manifest-gated": {Baseline: profiles.Expectation{After: profiles.DecisionReject, AfterReasons: []profiles.Reason{profiles.ReasonRevoked}}, Policy: profiles.Expectation{After: profiles.DecisionReject, AfterReasons: []profiles.Reason{profiles.ReasonRevoked}}},
+	}
 	r := &Runner{Config: &config.Config{
 		PollInterval: time.Millisecond,
 		MaxWait:      time.Second,
 		MaxAttempts:  1,
 		Profiles: []config.ProfileConfig{
 			{Name: "independent", Enabled: true, Timeout: time.Second},
-			{Name: "stapled", Enabled: true, Timeout: time.Second},
+			{Name: "manifest-gated", Enabled: true, Timeout: time.Second},
 		},
-	}, Stapling: canary.StaplingOn, Scenarios: testScenarios("independent", "stapled")}
+	}, Scenario: scenarioID, Scenarios: scenarios.New(scenarios.Manifest{ID: scenarioID, Digest: "sha256:test", Stapling: scenarios.StaplingOn, Profiles: contracts, EvidenceDependencies: map[string][]scenarios.EvidenceDependency{
+		"independent":    {scenarios.EvidenceIssuerAck},
+		"manifest-gated": {scenarios.EvidenceStaplePublished},
+	}})}
 	independentStarted := make(chan struct{})
 	clientProfiles := []profiles.Profile{
 		{Name: "independent", Role: profiles.RoleClientExecutor, Method: profiles.MethodNone, Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
 			close(independentStarted)
 			return profiles.Observation{Decision: profiles.DecisionReject, Reason: profiles.ReasonRevoked}, nil
 		}},
-		{Name: "stapled", Role: profiles.RoleClientExecutor, Method: profiles.MethodOCSPStapled, Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
+		{Name: "manifest-gated", Role: profiles.RoleClientExecutor, Method: profiles.MethodNone, Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
 			return profiles.Observation{Decision: profiles.DecisionReject, Reason: profiles.ReasonRevoked}, nil
 		}},
 	}
@@ -102,7 +107,10 @@ func TestPollClientsDoesNotWaitForStapleBeforeRunningIndependentClient(t *testin
 	stapleReady := make(chan struct{})
 	done := make(chan []profiles.Result, 1)
 	go func() {
-		done <- r.pollClients(context.Background(), profiles.Target{Scenario: profiles.ScenarioRevokedStaple}, time.Now(), stapleReady, func() error { return nil })
+		done <- r.pollClients(context.Background(), profiles.Target{Scenario: scenarioID}, time.Now(), map[scenarios.EvidenceDependency]evidenceBarrier{
+			scenarios.EvidenceIssuerAck:       {ready: closedEvidence()},
+			scenarios.EvidenceStaplePublished: {ready: stapleReady},
+		})
 	}()
 	select {
 	case <-independentStarted:
@@ -111,7 +119,7 @@ func TestPollClientsDoesNotWaitForStapleBeforeRunningIndependentClient(t *testin
 	}
 	select {
 	case <-done:
-		t.Fatal("stapled client ran before staple publication")
+		t.Fatal("manifest-gated client ran before staple publication")
 	default:
 	}
 	close(stapleReady)

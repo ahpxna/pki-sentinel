@@ -28,7 +28,7 @@ type Runner struct {
 	Config    *config.Config
 	Profiles  []profiles.Profile
 	Scenarios *scenarios.Registry
-	Stapling  canary.StaplingMode
+	Scenario  profiles.Scenario
 
 	OCSPURL string
 	CRLURL  string
@@ -71,6 +71,16 @@ type Timeline struct {
 
 // RunOnce executes exactly one probe cycle.
 func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
+	scenario := r.Scenario
+	if scenario == "" {
+		return nil, fmt.Errorf("runner: scenario is required")
+	}
+	manifest, ok := r.Scenarios.Manifest(scenario)
+	if !ok {
+		return nil, fmt.Errorf("runner: no loaded scenario manifest for %s", scenario)
+	}
+	scenarioDigest := manifest.Digest
+	stapling := canary.StaplingMode(manifest.Stapling)
 	cycleID := uuid.New().String()[:8]
 	hostname := fmt.Sprintf("canary-%s.canary.%s", cycleID, r.Domain)
 
@@ -81,14 +91,8 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 		return nil, fmt.Errorf("runner: issuing canary: %w", err)
 	}
 	metrics.CertNotAfter.Set(float64(cert.Cert.NotAfter.Unix()))
-	scenario := scenarioForStapling(r.Stapling)
-	scenarioDigest, ok := r.Scenarios.Digest(scenario)
-	if !ok {
-		return nil, fmt.Errorf("runner: no loaded scenario manifest for %s", scenario)
-	}
-
 	var staple []byte
-	if r.Stapling == canary.StaplingOn || r.Stapling == canary.StaplingStale {
+	if stapling == canary.StaplingOn || stapling == canary.StaplingStale {
 		// StaplingStale fetches the OCSP response BEFORE revocation and
 		// keeps serving that same stale "good" response after revocation —
 		// exactly how an attacker would extend a compromised cert's
@@ -157,12 +161,23 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 
 	// Status channels begin immediately after the issuer acknowledgement. They
 	// never form a global barrier for clients using a different delivery path.
-	oracleDone := make(chan []profiles.Result, 1)
-	go func() { oracleDone <- r.pollRole(ctx, profiles.RoleStatusOracle, target, revokeAckAt) }()
+	issuerAckReady := closedEvidence()
+	ocspPublishedReady := make(chan struct{})
+	crlPublishedReady := make(chan struct{})
+	ocspDone := make(chan []profiles.Result, 1)
+	crlDone := make(chan []profiles.Result, 1)
+	go func() {
+		defer close(ocspPublishedReady)
+		ocspDone <- r.pollMethod(ctx, profiles.MethodOCSPDirect, target, revokeAckAt)
+	}()
+	go func() {
+		defer close(crlPublishedReady)
+		crlDone <- r.pollMethod(ctx, profiles.MethodCRL, target, revokeAckAt)
+	}()
 
 	stapleReady := make(chan struct{})
 	var stapleErr error
-	if r.Stapling == canary.StaplingOn {
+	if stapling == canary.StaplingOn {
 		go func() {
 			timeline.OCSPFirstRevoked, stapleErr = r.refreshRevokedStaple(ctx, srv, cert)
 			if stapleErr == nil {
@@ -174,12 +189,18 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 		close(stapleReady)
 	}
 
-	clients := r.pollClients(ctx, target, revokeAckAt, stapleReady, func() error { return stapleErr })
-	oracles := <-oracleDone
-	// Reporting waits for the staple publisher to finish, but no non-stapled
-	// client waited on it. This establishes a happens-before edge for timeline
-	// data even when all stapled profiles are disabled.
-	if r.Stapling == canary.StaplingOn {
+	barriers := map[scenarios.EvidenceDependency]evidenceBarrier{
+		scenarios.EvidenceIssuerAck:       {ready: issuerAckReady},
+		scenarios.EvidenceOCSPPublished:   {ready: ocspPublishedReady},
+		scenarios.EvidenceCRLPublished:    {ready: crlPublishedReady},
+		scenarios.EvidenceStaplePublished: {ready: stapleReady, err: func() error { return stapleErr }},
+	}
+	clients := r.pollClients(ctx, target, revokeAckAt, barriers)
+	oracles := append(<-ocspDone, <-crlDone...)
+	// Reporting waits for the staple publisher to finish. The manifest decides
+	// which client profiles wait on this boundary; this wait establishes a
+	// happens-before edge for timeline data in every selected scenario.
+	if stapling == canary.StaplingOn {
 		<-stapleReady
 	}
 	for _, result := range oracles {
@@ -197,7 +218,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	results := append(oracles, clients...)
 	timeline.derive()
 	for i := range results {
-		if results[i].Method == profiles.MethodOCSPStapled && !timeline.StaplePublished.IsZero() && !results[i].DecisionAt.IsZero() {
+		if r.dependsOn(results[i].Scenario, results[i].Profile, scenarios.EvidenceStaplePublished) && !timeline.StaplePublished.IsZero() && !results[i].DecisionAt.IsZero() {
 			results[i].EnforcementLatency = results[i].DecisionAt.Sub(timeline.StaplePublished)
 		}
 	}
@@ -251,17 +272,6 @@ func (t *Timeline) derive() {
 		if !t.StaplePublished.IsZero() {
 			t.StapleDistributionLatency = t.StaplePublished.Sub(t.RevokeAckAt)
 		}
-	}
-}
-
-func scenarioForStapling(mode canary.StaplingMode) profiles.Scenario {
-	switch mode {
-	case canary.StaplingOff:
-		return profiles.ScenarioMissingStaple
-	case canary.StaplingStale:
-		return profiles.ScenarioCachedGoodStaple
-	default:
-		return profiles.ScenarioRevokedStaple
 	}
 }
 
@@ -345,10 +355,9 @@ func (r *Runner) preflight(ctx context.Context, target profiles.Target) error {
 	return nil
 }
 
-// pollClients waits only on evidence required by each client method. A
-// stapled-OCSP client waits for the new staple; a client with no revocation
-// check can be measured immediately and never waits for a slow CRL rebuild.
-func (r *Runner) pollClients(ctx context.Context, target profiles.Target, revokedAt time.Time, stapleReady <-chan struct{}, stapleError func() error) []profiles.Result {
+// pollClients waits only on the manifest-declared evidence boundaries for a
+// profile. The implementation method does not imply a wait condition.
+func (r *Runner) pollClients(ctx context.Context, target profiles.Target, revokedAt time.Time, barriers map[scenarios.EvidenceDependency]evidenceBarrier) []profiles.Result {
 	var wg sync.WaitGroup
 	results := make([]profiles.Result, 0, len(r.Profiles))
 	var mu sync.Mutex
@@ -359,21 +368,11 @@ func (r *Runner) pollClients(ctx context.Context, target profiles.Target, revoke
 		wg.Add(1)
 		go func(p profiles.Profile) {
 			defer wg.Done()
-			if p.Method == profiles.MethodOCSPStapled && r.Stapling == canary.StaplingOn {
-				select {
-				case <-ctx.Done():
-					mu.Lock()
-					results = append(results, r.harnessResult(p, target, revokedAt, ctx.Err()))
-					mu.Unlock()
-					return
-				case <-stapleReady:
-				}
-				if err := stapleError(); err != nil {
-					mu.Lock()
-					results = append(results, r.harnessResult(p, target, revokedAt, err))
-					mu.Unlock()
-					return
-				}
+			if err := r.waitForEvidence(ctx, target.Scenario, p.Name, barriers); err != nil {
+				mu.Lock()
+				results = append(results, r.harnessResult(p, target, revokedAt, err))
+				mu.Unlock()
+				return
 			}
 			result := r.pollOne(ctx, p, target, revokedAt)
 			mu.Lock()
@@ -385,19 +384,67 @@ func (r *Runner) pollClients(ctx context.Context, target profiles.Target, revoke
 	return results
 }
 
+type evidenceBarrier struct {
+	ready <-chan struct{}
+	err   func() error
+}
+
+func closedEvidence() <-chan struct{} {
+	ready := make(chan struct{})
+	close(ready)
+	return ready
+}
+
+func (r *Runner) waitForEvidence(ctx context.Context, scenario profiles.Scenario, profile string, barriers map[scenarios.EvidenceDependency]evidenceBarrier) error {
+	dependencies, ok := r.Scenarios.Dependencies(scenario, profile)
+	if !ok {
+		return fmt.Errorf("profile %s has no evidence dependencies for scenario %s", profile, scenario)
+	}
+	for _, dependency := range dependencies {
+		barrier, ok := barriers[dependency]
+		if !ok || barrier.ready == nil {
+			return fmt.Errorf("profile %s requires unavailable evidence dependency %s", profile, dependency)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-barrier.ready:
+		}
+		if barrier.err != nil {
+			if err := barrier.err(); err != nil {
+				return fmt.Errorf("profile %s waiting for %s: %w", profile, dependency, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (r *Runner) dependsOn(scenario profiles.Scenario, profile string, dependency scenarios.EvidenceDependency) bool {
+	dependencies, ok := r.Scenarios.Dependencies(scenario, profile)
+	if !ok {
+		return false
+	}
+	for _, candidate := range dependencies {
+		if candidate == dependency {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Runner) harnessResult(p profiles.Profile, target profiles.Target, revokedAt time.Time, err error) profiles.Result {
 	contract, _ := r.Scenarios.Contract(target.Scenario, p.Name)
 	expectation := contract.Baseline
 	return profiles.Result{Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario, Decision: profiles.DecisionHarnessError, Reason: profiles.ReasonHarnessFailure, ExpectedDecision: expectation.After, ExpectedReasons: expectation.AfterReasons, CertificateSerial: target.CertificateSerial, RevokeAckAt: revokedAt, Err: err.Error()}
 }
 
-func (r *Runner) pollRole(ctx context.Context, role profiles.Role, target profiles.Target, revokedAt time.Time) []profiles.Result {
+func (r *Runner) pollMethod(ctx context.Context, method profiles.CheckMethod, target profiles.Target, revokedAt time.Time) []profiles.Result {
 	var wg sync.WaitGroup
 	results := make([]profiles.Result, 0, len(r.Profiles))
 	var mu sync.Mutex
 
 	for _, p := range r.Profiles {
-		if !r.Config.IsEnabled(p.Name) || p.Role != role {
+		if !r.Config.IsEnabled(p.Name) || p.Role != profiles.RoleStatusOracle || p.Method != method {
 			continue
 		}
 		wg.Add(1)
@@ -423,7 +470,7 @@ func (r *Runner) pollOne(ctx context.Context, p profiles.Profile, target profile
 	}()
 	deadline := time.Now().Add(r.Config.MaxWait)
 	attempts := 0
-	stapling := string(r.Stapling)
+	stapling := string(r.staplingFor(target.Scenario))
 	var lastErr error
 	lastObservation := profiles.Observation{Decision: profiles.DecisionInconclusive, Reason: profiles.ReasonHarnessFailure}
 	contract, ok := r.Scenarios.Contract(target.Scenario, p.Name)
@@ -513,6 +560,14 @@ func (r *Runner) pollOne(ctx context.Context, p profiles.Profile, target profile
 		case <-time.After(r.Config.PollInterval):
 		}
 	}
+}
+
+func (r *Runner) staplingFor(scenario profiles.Scenario) scenarios.StaplingMode {
+	manifest, ok := r.Scenarios.Manifest(scenario)
+	if !ok {
+		return ""
+	}
+	return manifest.Stapling
 }
 
 func (r *Runner) applyPolicy(profile profiles.Profile, scenario profiles.Scenario, result profiles.Result) profiles.Result {

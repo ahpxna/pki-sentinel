@@ -25,11 +25,21 @@ func TestProductionManifestsValidateAndHaveStableDigests(t *testing.T) {
 	if err := first.ValidateEnabledProfiles(profileNames(implementations)); err != nil {
 		t.Fatalf("validate enabled profiles: %v", err)
 	}
+	for scenario, expectedStapling := range map[profiles.Scenario]StaplingMode{
+		"revoked_staple":     StaplingOn,
+		"missing_staple":     StaplingOff,
+		"cached_good_staple": StaplingStale,
+	} {
+		manifest, ok := first.Manifest(scenario)
+		if !ok || manifest.Stapling != expectedStapling {
+			t.Errorf("scenario %s execution stapling=%q, want %q", scenario, manifest.Stapling, expectedStapling)
+		}
+	}
 	second, err := LoadDir(productionScenarioDir(t), implementations)
 	if err != nil {
 		t.Fatalf("reload production manifests: %v", err)
 	}
-	for _, scenario := range []profiles.Scenario{profiles.ScenarioRevokedStaple, profiles.ScenarioMissingStaple, profiles.ScenarioCachedGoodStaple} {
+	for _, scenario := range []profiles.Scenario{"revoked_staple", "missing_staple", "cached_good_staple"} {
 		firstDigest, ok := first.Digest(scenario)
 		if !ok || !strings.HasPrefix(firstDigest, "sha256:") || len(firstDigest) != len("sha256:")+64 {
 			t.Fatalf("scenario %s has invalid digest %q", scenario, firstDigest)
@@ -67,6 +77,8 @@ func TestLoadDirRejectsInvalidManifests(t *testing.T) {
 	t.Parallel()
 	valid := `id: test
 version: 1
+execution:
+  stapling: off
 evidence_dependencies:
   curl-default: [issuer_ack]
 profiles:
@@ -86,8 +98,13 @@ profiles:
 		{"unknown field", strings.Replace(valid, "version: 1", "version: 1\nunexpected: true", 1), "", "field unexpected not found"},
 		{"unknown decision", strings.Replace(valid, "ACCEPT", "MAYBE", 1), "", "unknown decision"},
 		{"unknown reason", strings.Replace(valid, "NO_REVOCATION_CHECK", "MAYBE", 1), "", "unknown reason"},
+		{"missing reasons", strings.Replace(valid, ", reasons: [NO_REVOCATION_CHECK]", "", 1), "", "must declare at least one reason"},
+		{"empty reasons", strings.Replace(valid, "[NO_REVOCATION_CHECK]", "[]", 1), "", "must declare at least one reason"},
 		{"invalid evidence", strings.Replace(valid, "issuer_ack", "future_magic", 1), "", "unknown evidence dependency"},
 		{"missing evidence", strings.Replace(valid, "  curl-default: [issuer_ack]\n", "", 1), "", "has no evidence dependencies"},
+		{"empty evidence", strings.Replace(valid, "[issuer_ack]", "[]", 1), "", "empty evidence dependency list"},
+		{"missing execution", strings.Replace(valid, "execution:\n  stapling: off\n", "", 1), "", "invalid execution.stapling"},
+		{"staple dependency without staple execution", strings.Replace(valid, "issuer_ack", "staple_published", 1), "", "requires staple_published"},
 		{"duplicate scenario", valid, valid, "duplicate scenario"},
 		{"duplicate profile", valid + "  curl-default:\n    baseline: {before: {decision: ACCEPT}, after: {decision: ACCEPT}}\n    policy: {after: {decision: REJECT}}\n", "", "mapping key"},
 	}
@@ -112,7 +129,7 @@ profiles:
 
 func TestValidateEnabledProfilesRejectsMissingContract(t *testing.T) {
 	t.Parallel()
-	registry := New(Manifest{ID: profiles.ScenarioRevokedStaple, Profiles: map[string]Contract{}})
+	registry := New(Manifest{ID: "revoked_staple", Profiles: map[string]Contract{}})
 	if err := registry.ValidateEnabledProfiles([]string{"curl-default"}); err == nil {
 		t.Fatal("accepted an enabled profile with no scenario contract")
 	}
@@ -150,8 +167,8 @@ func baselineContracts() map[profiles.Scenario]map[string]Contract {
 	curlRevoked := goodThenRevoked
 	curlRevoked.AfterReasons = []profiles.Reason{profiles.ReasonRevoked, profiles.ReasonInvalidStatus}
 	return map[profiles.Scenario]map[string]Contract{
-		profiles.ScenarioRevokedStaple:    contracts(goodThenRevoked, curlRevoked, goodThenRevoked),
-		profiles.ScenarioMissingStaple:    contracts(goodThenRevoked, missing, missing),
-		profiles.ScenarioCachedGoodStaple: contracts(goodThenRevoked, cachedGood, cachedGood),
+		"revoked_staple":     contracts(goodThenRevoked, curlRevoked, goodThenRevoked),
+		"missing_staple":     contracts(goodThenRevoked, missing, missing),
+		"cached_good_staple": contracts(goodThenRevoked, cachedGood, cachedGood),
 	}
 }

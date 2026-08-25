@@ -1,5 +1,7 @@
 id: cached_good_staple
 version: 1
+execution:
+  stapling: stale
 evidence_dependencies:
   openssl-ocsp-direct: [issuer_ack]
   crl-check: [issuer_ack]

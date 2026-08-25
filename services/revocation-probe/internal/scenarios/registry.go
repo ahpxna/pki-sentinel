@@ -21,6 +21,17 @@ import (
 
 const Version = 1
 
+// StaplingMode controls the canary's OCSP-staple behavior for a scenario.
+// It is part of the versioned manifest so scenario execution is selected from
+// declarative input instead of a runner-side scenario mapping.
+type StaplingMode string
+
+const (
+	StaplingOn    StaplingMode = "on"
+	StaplingOff   StaplingMode = "off"
+	StaplingStale StaplingMode = "stale"
+)
+
 // EvidenceDependency names a timeline boundary that a profile needs before
 // its post-revocation observation begins.
 type EvidenceDependency string
@@ -55,11 +66,16 @@ type yamlProfileContract struct {
 	Policy   yamlPolicy   `yaml:"policy" json:"policy"`
 }
 
+type yamlExecution struct {
+	Stapling StaplingMode `yaml:"stapling" json:"stapling"`
+}
+
 type yamlManifest struct {
 	ID                   string                          `yaml:"id" json:"id"`
 	Version              int                             `yaml:"version" json:"version"`
 	EvidenceDependencies map[string][]EvidenceDependency `yaml:"evidence_dependencies" json:"evidence_dependencies"`
 	Profiles             map[string]yamlProfileContract  `yaml:"profiles" json:"profiles"`
+	Execution            yamlExecution                   `yaml:"execution" json:"execution"`
 }
 
 // Contract preserves the established baseline and policy contracts for one
@@ -76,6 +92,7 @@ type Manifest struct {
 	Digest               string
 	EvidenceDependencies map[string][]EvidenceDependency
 	Profiles             map[string]Contract
+	Stapling             StaplingMode
 }
 
 // Registry provides scenario contracts and their digests by stable ID.
@@ -123,6 +140,9 @@ func parseExpectation(value yamlExpectation, required bool, field string) (profi
 	decision, ok := validDecision(value.Decision)
 	if !ok {
 		return profiles.Expectation{}, fmt.Errorf("%s has unknown decision %q", field, value.Decision)
+	}
+	if len(value.Reasons) == 0 {
+		return profiles.Expectation{}, fmt.Errorf("%s must declare at least one reason", field)
 	}
 	reasons := make([]profiles.Reason, 0, len(value.Reasons))
 	for _, raw := range value.Reasons {
@@ -203,11 +223,16 @@ func build(raw yamlManifest, profilesByName map[string]struct{}) (Manifest, erro
 	if len(raw.Profiles) == 0 {
 		return Manifest{}, fmt.Errorf("scenario %q has no profiles", raw.ID)
 	}
+	switch raw.Execution.Stapling {
+	case StaplingOn, StaplingOff, StaplingStale:
+	default:
+		return Manifest{}, fmt.Errorf("scenario %q has invalid execution.stapling %q", raw.ID, raw.Execution.Stapling)
+	}
 	digest, err := canonicalDigest(raw)
 	if err != nil {
 		return Manifest{}, err
 	}
-	manifest := Manifest{ID: profiles.Scenario(raw.ID), Version: raw.Version, Digest: digest, EvidenceDependencies: raw.EvidenceDependencies, Profiles: make(map[string]Contract, len(raw.Profiles))}
+	manifest := Manifest{ID: profiles.Scenario(raw.ID), Version: raw.Version, Digest: digest, EvidenceDependencies: raw.EvidenceDependencies, Profiles: make(map[string]Contract, len(raw.Profiles)), Stapling: raw.Execution.Stapling}
 	for name, rawContract := range raw.Profiles {
 		if _, ok := profilesByName[name]; !ok {
 			return Manifest{}, fmt.Errorf("scenario %q references unknown profile %q", raw.ID, name)
@@ -232,6 +257,9 @@ func build(raw yamlManifest, profilesByName map[string]struct{}) (Manifest, erro
 			return Manifest{}, fmt.Errorf("scenario %q has evidence dependencies for unknown profile %q", raw.ID, profile)
 		}
 		seen := make(map[EvidenceDependency]struct{}, len(dependencies))
+		if len(dependencies) == 0 {
+			return Manifest{}, fmt.Errorf("scenario %q profile %q has an empty evidence dependency list", raw.ID, profile)
+		}
 		for _, dependency := range dependencies {
 			if _, ok := knownEvidence[dependency]; !ok {
 				return Manifest{}, fmt.Errorf("scenario %q profile %q has unknown evidence dependency %q", raw.ID, profile, dependency)
@@ -240,6 +268,9 @@ func build(raw yamlManifest, profilesByName map[string]struct{}) (Manifest, erro
 				return Manifest{}, fmt.Errorf("scenario %q profile %q repeats evidence dependency %q", raw.ID, profile, dependency)
 			}
 			seen[dependency] = struct{}{}
+		}
+		if _, requiresStaple := seen[EvidenceStaplePublished]; requiresStaple && raw.Execution.Stapling != StaplingOn {
+			return Manifest{}, fmt.Errorf("scenario %q profile %q requires staple_published but execution.stapling is %q", raw.ID, profile, raw.Execution.Stapling)
 		}
 	}
 	return manifest, nil
@@ -293,6 +324,30 @@ func (r *Registry) Digest(scenario profiles.Scenario) (string, bool) {
 	}
 	manifest, ok := r.manifests[scenario]
 	return manifest.Digest, ok
+}
+
+// Manifest returns the selected executable scenario and its validated
+// execution settings. Callers must resolve it before any issuer side effect.
+func (r *Registry) Manifest(scenario profiles.Scenario) (Manifest, bool) {
+	if r == nil {
+		return Manifest{}, false
+	}
+	manifest, ok := r.manifests[scenario]
+	return manifest, ok
+}
+
+// Dependencies returns a copy of the evidence boundaries that gate a
+// profile's post-revocation measurement.
+func (r *Registry) Dependencies(scenario profiles.Scenario, profile string) ([]EvidenceDependency, bool) {
+	manifest, ok := r.Manifest(scenario)
+	if !ok {
+		return nil, false
+	}
+	dependencies, ok := manifest.EvidenceDependencies[profile]
+	if !ok {
+		return nil, false
+	}
+	return append([]EvidenceDependency(nil), dependencies...), true
 }
 
 // ValidateEnabledProfiles requires the baseline and policy contract for every

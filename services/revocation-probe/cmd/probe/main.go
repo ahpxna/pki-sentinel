@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/attestation"
-	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/canary"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/chaos"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/config"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/executor"
@@ -60,7 +59,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  probe run   [--once] [--config profiles.yaml] [--output json]
+	probe run   [--once] [--config profiles.yaml] [--scenario <id>] [--output json]
   probe check --profile <name> --target <https://host:port> --ca <chain.pem> [--ocsp-url URL] [--crl-url URL]
   probe chaos sweep [--delays 0,1000,2000] [--trials 5] [--out path.csv]
   probe attest verify --public-key attestation.pub --input cycle.attestation.json
@@ -81,9 +80,9 @@ func cmdRun(args []string) {
 	once := fs.Bool("once", false, "run a single cycle and exit")
 	cfgPath := fs.String("config", "profiles.yaml", "path to profiles.yaml")
 	scenarioDir := fs.String("scenarios", "scenarios", "directory containing scenario manifests")
+	scenarioID := fs.String("scenario", "revoked_staple", "scenario manifest ID to execute")
 	output := fs.String("output", "text", "output format: text|json")
 	interval := fs.Duration("interval", 15*time.Minute, "cycle interval when not --once")
-	stapling := fs.String("stapling", "on", "OCSP stapling mode: on|off|stale")
 	metricsAddr := fs.String("metrics-addr", ":9110", "address to serve /metrics, /healthz, /readyz")
 	attestationKey := fs.String("attestation-key", env("ASSURANCE_ATTESTATION_KEY", ""), "Ed25519 PKCS#8 private-key PEM used to sign each cycle report")
 	attestationOut := fs.String("attestation-out", env("ASSURANCE_ATTESTATION_OUT", ""), "attestation envelope JSON path (requires --attestation-key)")
@@ -93,11 +92,6 @@ func cmdRun(args []string) {
 	}
 	if *interval <= 0 {
 		log.Fatal("probe run: --interval must be positive")
-	}
-	switch canary.StaplingMode(*stapling) {
-	case canary.StaplingOn, canary.StaplingOff, canary.StaplingStale:
-	default:
-		log.Fatalf("probe run: invalid --stapling %q; expected on, off, or stale", *stapling)
 	}
 	if (*attestationKey == "") != (*attestationOut == "") {
 		log.Fatal("probe run: --attestation-key and --attestation-out must be supplied together")
@@ -129,6 +123,10 @@ func cmdRun(args []string) {
 	}
 	if err := scenarioRegistry.ValidateEnabledProfiles(cfg.EnabledNames()); err != nil {
 		log.Fatalf("probe run: validating scenarios: %v", err)
+	}
+	selectedScenario, ok := scenarioRegistry.Manifest(profiles.Scenario(*scenarioID))
+	if !ok {
+		log.Fatalf("probe run: selected scenario %q is not loaded", *scenarioID)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -166,7 +164,7 @@ func cmdRun(args []string) {
 		Config:    cfg,
 		Profiles:  profileRegistry,
 		Scenarios: scenarioRegistry,
-		Stapling:  canary.StaplingMode(*stapling),
+		Scenario:  selectedScenario.ID,
 		OCSPURL:   vaultPublicAddr + "/v1/pki_int/ocsp",
 		// Delta CRLs require base+delta merge semantics. The oracle consumes
 		// the complete issuer-signed CRL as its standalone source of truth.
@@ -310,7 +308,7 @@ func cmdCheck(args []string) {
 	}
 	t := profiles.Target{
 		Host: host, Port: port, CAChainPEM: string(caPEM), IssuerPEM: string(caPEM),
-		OCSPURL: *ocspURL, CRLURL: *crlURL, Scenario: profiles.ScenarioRevokedStaple,
+		OCSPURL: *ocspURL, CRLURL: *crlURL, Scenario: profiles.Scenario("standalone_check"),
 	}
 	observation, err := found.Probe(ctx, t)
 	if err != nil {
@@ -398,6 +396,7 @@ func cmdChaos(args []string) {
 	delaysFlag := fs.String("delays", "", "comma-separated delay list in ms (default: dense sweep near 2s)")
 	trials := fs.Int("trials", 5, "trials per delay level")
 	out := fs.String("out", "", "output CSV path (default: docs/benchmarks/data/chaos-<timestamp>.csv)")
+	scenarioID := fs.String("scenario", "missing_staple", "scenario manifest ID to execute")
 	_ = fs.Parse(args[1:])
 	if *trials < 1 {
 		log.Fatal("chaos sweep: --trials must be at least 1")
@@ -459,12 +458,19 @@ func cmdChaos(args []string) {
 	if err := scenarioRegistry.ValidateEnabledProfiles(cfg.EnabledNames()); err != nil {
 		log.Fatalf("chaos sweep: validating scenarios: %v", err)
 	}
+	selectedScenario, ok := scenarioRegistry.Manifest(profiles.Scenario(*scenarioID))
+	if !ok {
+		log.Fatalf("chaos sweep: selected scenario %q is not loaded", *scenarioID)
+	}
+	if selectedScenario.Stapling != scenarios.StaplingOff {
+		log.Fatalf("chaos sweep: scenario %q requires stapling mode %q; this command supports only off", selectedScenario.ID, selectedScenario.Stapling)
+	}
 	r := &runner.Runner{
 		Issuer:      issuerClient,
 		Config:      cfg,
 		Profiles:    profiles.Registry(),
 		Scenarios:   scenarioRegistry,
-		Stapling:    canary.StaplingOff,
+		Scenario:    selectedScenario.ID,
 		OCSPURL:     faultProxy.URL() + ocspPath,
 		CRLURL:      vaultPublicAddr + "/v1/pki_int/crl",
 		Domain:      domain,

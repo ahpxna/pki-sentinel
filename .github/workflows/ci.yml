@@ -119,6 +119,8 @@ jobs:
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.9.5"
+      - name: generate integration attestation key
+        run: ./scripts/generate-attestation-key.sh
       - name: start stack
         run: |
           cp .env.example .env
@@ -161,12 +163,19 @@ jobs:
       - name: run one probe cycle
         run: |
           docker compose exec -T revocation-probe \
-            probe run --once --output json > /tmp/cycle.json
+            probe run --once --output json \
+              --attestation-key /run/attestation/assurance.key \
+              --attestation-out /run/attestation/last-cycle.attestation.json > /tmp/cycle.json
+          docker compose exec -T revocation-probe \
+            probe attest verify --public-key /run/attestation/assurance.pub \
+              --input /run/attestation/last-cycle.attestation.json
           cat /tmp/cycle.json
       - name: go test -tags=integration
         working-directory: tests/integration
         env:
           PROBE_REPORT: /tmp/cycle.json
+          PROBE_ATTESTATION: ../../.data/attestation/last-cycle.attestation.json
+          PROBE_ATTESTATION_PUBLIC_KEY: ../../.data/attestation/assurance.pub
         run: go test -tags=integration ./... -v
       - name: install conftest for the live Terraform-plan policy gate
         run: |

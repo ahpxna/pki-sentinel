@@ -11,6 +11,7 @@ package integration
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -37,8 +38,17 @@ type result struct {
 }
 
 type cycleReport struct {
-	CycleID string   `json:"cycle_id"`
-	Results []result `json:"results"`
+	CycleID        string   `json:"cycle_id"`
+	Scenario       string   `json:"scenario"`
+	ScenarioDigest string   `json:"scenario_digest"`
+	Results        []result `json:"results"`
+}
+
+type attestationEnvelope struct {
+	Statement struct {
+		ScenarioDigest string `json:"scenario_digest"`
+	} `json:"statement"`
+	Payload json.RawMessage `json:"payload"`
 }
 
 func runProbeOnce(t *testing.T) cycleReport {
@@ -100,6 +110,12 @@ func TestRevocationEnforcement(t *testing.T) {
 	if report.CycleID == "" || len(report.Results) == 0 {
 		t.Fatal("probe returned an empty cycle report")
 	}
+	if report.Scenario != "revoked_staple" {
+		t.Fatalf("probe scenario=%q, want revoked_staple", report.Scenario)
+	}
+	if !validScenarioDigest(report.ScenarioDigest) {
+		t.Fatalf("probe report has invalid scenario_digest %q", report.ScenarioDigest)
+	}
 
 	oracle := findResult(t, report, "openssl-ocsp-direct")
 	if oracle.Role != "status_oracle" || oracle.Decision != "REJECT" || oracle.Reason != "REVOKED" {
@@ -128,6 +144,52 @@ func TestRevocationEnforcement(t *testing.T) {
 			t.Errorf("%s: reason=%s expected one of %v", r.Profile, r.Reason, r.ExpectedReasons)
 		}
 	}
+}
+
+// TestAttestationBindsScenarioDigest verifies the integration cycle's actual
+// envelope, not a synthetic payload. CI provisions these paths alongside the
+// cycle report; local report-only runs skip this explicit signature check.
+func TestAttestationBindsScenarioDigest(t *testing.T) {
+	attestationPath := os.Getenv("PROBE_ATTESTATION")
+	publicKeyPath := os.Getenv("PROBE_ATTESTATION_PUBLIC_KEY")
+	if attestationPath == "" || publicKeyPath == "" {
+		t.Skip("PROBE_ATTESTATION and PROBE_ATTESTATION_PUBLIC_KEY are not configured")
+	}
+	report := runProbeOnce(t)
+	contents, err := os.ReadFile(attestationPath)
+	if err != nil {
+		t.Fatalf("reading attestation %s: %v", attestationPath, err)
+	}
+	var envelope attestationEnvelope
+	if err := json.Unmarshal(contents, &envelope); err != nil {
+		t.Fatalf("parsing attestation: %v", err)
+	}
+	if envelope.Statement.ScenarioDigest != report.ScenarioDigest {
+		t.Fatalf("attestation digest=%q, report digest=%q", envelope.Statement.ScenarioDigest, report.ScenarioDigest)
+	}
+	var payload cycleReport
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatalf("parsing attestation payload: %v", err)
+	}
+	if payload.Scenario != report.Scenario || payload.ScenarioDigest != report.ScenarioDigest {
+		t.Fatalf("attestation payload does not match report scenario identity: %#v", payload)
+	}
+	binPath := os.Getenv("PROBE_BIN")
+	if binPath == "" {
+		binPath = "../../services/revocation-probe/bin/probe"
+	}
+	cmd := exec.Command(binPath, "attest", "verify", "--public-key", publicKeyPath, "--input", attestationPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("verifying attestation: %v\n%s", err, output)
+	}
+}
+
+func validScenarioDigest(value string) bool {
+	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+	return err == nil
 }
 
 // TestCycleMetrics waits for the continuously running Compose probe to finish

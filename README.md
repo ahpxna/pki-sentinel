@@ -154,12 +154,12 @@ public key. A standalone process can produce the same envelope with
 
 ## Assurance matrix
 
-Status oracles start immediately after issuer acknowledgement. Clients run as
-soon as their own evidence source is available: only stapled-OCSP clients wait
-for a newly published staple. The report separately records status propagation,
-staple distribution, and client enforcement timing. A result satisfies an
-explicit scenario contract; a TLS or network failure is `INCONCLUSIVE`, not a
-successful rejection.
+Status oracles start immediately after issuer acknowledgement. Each client
+waits for the evidence boundary declared for it in the selected scenario
+manifest; the client method is not the source of that scheduling decision. The
+report separately records status propagation, staple distribution, and client
+enforcement timing. A result satisfies an explicit scenario contract; a TLS or
+network failure is `INCONCLUSIVE`, not a successful rejection.
 
 | Profile | Role | Method | `revoked_staple` contract |
 |---|---|---|---|

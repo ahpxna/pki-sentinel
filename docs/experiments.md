@@ -22,7 +22,8 @@ Implemented in [`services/revocation-probe/scenarios/`](../services/revocation-p
 Each version-1 manifest is a strict YAML input; its canonical JSON SHA-256 is
 reported as `scenario_digest` and bound into the signed attestation statement.
 The runtime rejects unknown fields, decisions, reasons, evidence dependencies,
-duplicate scenarios or profile keys, and contracts missing an enabled profile.
+duplicate scenarios or profile keys, empty reason/dependency lists, and
+contracts missing an enabled profile.
 
 The three baseline manifests preserve the established `revoked_staple`,
 `missing_staple`, and `cached_good_staple` observations:
@@ -30,6 +31,8 @@ The three baseline manifests preserve the established `revoked_staple`,
 ```yaml
 id: revoked_staple
 version: 1
+execution:
+  stapling: on
 evidence_dependencies:
   openssl-ocsp-direct: [issuer_ack]
   curl-cert-status: [staple_published]
@@ -42,9 +45,12 @@ profiles:
       after: {decision: REJECT, reasons: [REVOKED, MISSING_STATUS, INVALID_STATUS, STALE_STATUS, FUTURE_STATUS, UNKNOWN_STATUS, MISSING_FRESHNESS_BOUND]}
 ```
 
-CI validates the production manifests and the unit suite asserts exact parity
-with the pre-manifest contracts. The `probe run --scenarios <directory>` flag
-allows an experiment to select a manifest directory explicitly.
+The selected `probe run --scenario <id>` manifest controls its canary stapling
+mode and each client profile's evidence boundary. For example,
+`staple_published` holds a profile until a revoked staple is published, while
+`issuer_ack` allows it to begin immediately after issuer acknowledgement.
+CI validates production manifests and the unit suite asserts exact parity with
+the pre-manifest contracts.
 
 ## Phase 2: client diversity matrix
 

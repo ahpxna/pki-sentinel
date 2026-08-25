@@ -59,16 +59,9 @@ const (
 	MethodNone        CheckMethod = "none"
 )
 
-// Scenario identifies a stable assurance experiment. The executable profile
-// implementation does not own scenario contracts; they are loaded from the
-// versioned scenario manifests.
+// Scenario identifies a stable assurance experiment selected from a versioned
+// scenario manifest. Profile implementations do not define scenario IDs.
 type Scenario string
-
-const (
-	ScenarioRevokedStaple    Scenario = "revoked_staple"
-	ScenarioMissingStaple    Scenario = "missing_staple"
-	ScenarioCachedGoodStaple Scenario = "cached_good_staple"
-)
 
 // Target describes the ephemeral canary TLS endpoint a profile should probe.
 type Target struct {
