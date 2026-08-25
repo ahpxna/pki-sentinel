@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+type cyclePayload struct {
+	CycleID        string `json:"cycle_id"`
+	ScenarioDigest string `json:"scenario_digest"`
+}
+
 func TestSignAndVerify(t *testing.T) {
 	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -26,9 +31,12 @@ func TestSignAndVerify(t *testing.T) {
 	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
 	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
 
-	envelope, err := Sign(privatePEM, map[string]string{"decision": "REJECT"}, time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC))
+	envelope, err := Sign(privatePEM, cyclePayload{CycleID: "cycle-1", ScenarioDigest: "sha256:scenario"}, time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if envelope.Statement.RunID != "cycle-1" || envelope.Statement.ScenarioDigest != "sha256:scenario" {
+		t.Fatalf("statement did not bind payload identity: %#v", envelope.Statement)
 	}
 	if err := Verify(publicPEM, envelope); err != nil {
 		t.Fatalf("verify signed envelope: %v", err)

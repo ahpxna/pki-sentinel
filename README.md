@@ -92,9 +92,9 @@ see [`docs/architecture.md`](docs/architecture.md) for the full diagram and
   issuer, CRL, and target-service traffic remain unaffected.
 - One network-isolated executor container per status-oracle or client profile.
   The controller runs no profile subprocesses when deployed through Compose.
-- Ed25519-signed, tamper-evident assurance-report envelopes that bind the
-  report digest, issue time, run identity, and scenario with an offline
-  verification command.
+- Versioned, strict scenario manifests with canonical SHA-256 digests that are
+  included in every cycle report and bound into Ed25519-signed, tamper-evident
+  assurance-report envelopes, with an offline verification command.
 - A trust-store exporter with `/metrics` and `/events`, signed-baseline
   verification, and detection of added, removed, changed, expired, and
   expiring roots.
@@ -195,12 +195,10 @@ convenience. None of them are hidden — see also `SECURITY.md` and
 
 ## Roadmap
 
-1. Implement the declarative scenario manifests and experiment matrix in
-   [`docs/experiments.md`](docs/experiments.md).
-2. Add unknown-status and expired-status OCSP response generators to the
+1. Add unknown-status and expired-status OCSP response generators to the
    responder-only fault proxy.
-3. Move local demo attestation signing to a KMS/HSM-backed signing service.
-4. Add independently versioned client-image variants, then issuer adapters
+2. Move local demo attestation signing to a KMS/HSM-backed signing service.
+3. Add independently versioned client-image variants, then issuer adapters
    for OpenBao and step-ca after the assurance contracts are stable.
 
 ## License

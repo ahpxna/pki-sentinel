@@ -39,11 +39,6 @@ func TestRegistryHasSevenBaselineProfiles(t *testing.T) {
 		if p.Role != RoleStatusOracle && p.Role != RoleClientExecutor {
 			t.Errorf("profile %s: invalid role %q", p.Name, p.Role)
 		}
-		for _, scenario := range []Scenario{ScenarioRevokedStaple, ScenarioMissingStaple, ScenarioCachedGoodStaple} {
-			if _, ok := p.Expected(scenario); !ok {
-				t.Errorf("profile %s: missing expectation for scenario %s", p.Name, scenario)
-			}
-		}
 		seen[p.Name] = true
 	}
 	for name := range wantMethods {

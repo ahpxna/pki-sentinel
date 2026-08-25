@@ -19,14 +19,16 @@ import (
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/issuer"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/metrics"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/scenarios"
 )
 
 // Runner ties together the issuer, canary server, and profile registry.
 type Runner struct {
-	Issuer   *issuer.Client
-	Config   *config.Config
-	Profiles []profiles.Profile
-	Stapling canary.StaplingMode
+	Issuer    *issuer.Client
+	Config    *config.Config
+	Profiles  []profiles.Profile
+	Scenarios *scenarios.Registry
+	Stapling  canary.StaplingMode
 
 	OCSPURL string
 	CRLURL  string
@@ -44,13 +46,14 @@ type Runner struct {
 // CycleReport is the structured JSON summary of one cycle (used by
 // `probe run --once --output json` and the integration test).
 type CycleReport struct {
-	CycleID     string              `json:"cycle_id"`
-	Scenario    profiles.Scenario   `json:"scenario"`
-	RevokeAckAt time.Time           `json:"revoke_ack_at"`
-	Timeline    Timeline            `json:"timeline"`
-	Artifacts   []profiles.Artifact `json:"artifacts,omitempty"`
-	Results     []profiles.Result   `json:"results"`
-	Error       string              `json:"error,omitempty"`
+	CycleID        string              `json:"cycle_id"`
+	Scenario       profiles.Scenario   `json:"scenario"`
+	ScenarioDigest string              `json:"scenario_digest"`
+	RevokeAckAt    time.Time           `json:"revoke_ack_at"`
+	Timeline       Timeline            `json:"timeline"`
+	Artifacts      []profiles.Artifact `json:"artifacts,omitempty"`
+	Results        []profiles.Result   `json:"results"`
+	Error          string              `json:"error,omitempty"`
 }
 
 // Timeline preserves measurement boundaries instead of overloading one
@@ -79,6 +82,10 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	}
 	metrics.CertNotAfter.Set(float64(cert.Cert.NotAfter.Unix()))
 	scenario := scenarioForStapling(r.Stapling)
+	scenarioDigest, ok := r.Scenarios.Digest(scenario)
+	if !ok {
+		return nil, fmt.Errorf("runner: no loaded scenario manifest for %s", scenario)
+	}
 
 	var staple []byte
 	if r.Stapling == canary.StaplingOn || r.Stapling == canary.StaplingStale {
@@ -136,7 +143,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	log.Printf("[cycle %s] pre-flight: verifying all profiles can reach the canary", cycleID)
 	if err := r.preflight(ctx, target); err != nil {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return &CycleReport{CycleID: cycleID, Scenario: scenario, Error: err.Error()}, err
+		return &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, Error: err.Error()}, err
 	}
 
 	tReq, tResp, err := r.Issuer.Revoke(ctx, cert.SerialNumber)
@@ -185,7 +192,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	}
 	if stapleErr != nil {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return &CycleReport{CycleID: cycleID, Scenario: scenario, RevokeAckAt: revokeAckAt, Timeline: timeline, Results: append(oracles, clients...)}, fmt.Errorf("runner: publishing revoked OCSP staple: %w", stapleErr)
+		return &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Results: append(oracles, clients...)}, fmt.Errorf("runner: publishing revoked OCSP staple: %w", stapleErr)
 	}
 	results := append(oracles, clients...)
 	timeline.derive()
@@ -200,28 +207,28 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	})
 	if err != nil {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return &CycleReport{CycleID: cycleID, Scenario: scenario, RevokeAckAt: revokeAckAt, Timeline: timeline, Results: results}, fmt.Errorf("runner: persisting cycle artifacts: %w", err)
+		return &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Results: results}, fmt.Errorf("runner: persisting cycle artifacts: %w", err)
 	}
 	if err := r.persistEvidence(cycleID, results); err != nil {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
-		return &CycleReport{CycleID: cycleID, Scenario: scenario, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}, fmt.Errorf("runner: persisting evidence: %w", err)
+		return &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}, fmt.Errorf("runner: persisting evidence: %w", err)
 	}
 	for _, result := range results {
 		if result.Decision == profiles.DecisionHarnessError || result.Err != "" {
 			metrics.CycleTotal.WithLabelValues("error").Inc()
-			report := &CycleReport{CycleID: cycleID, Scenario: scenario, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}
+			report := &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}
 			return report, fmt.Errorf("runner: profile %s failed: %s", result.Profile, result.Err)
 		}
 		if !result.ExpectationMet {
 			metrics.CycleTotal.WithLabelValues("regression").Inc()
-			report := &CycleReport{CycleID: cycleID, Scenario: scenario, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}
+			report := &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}
 			return report, fmt.Errorf("runner: security regression: profile %s produced %s/%s; expected %s", result.Profile, result.Decision, result.Reason, result.ExpectedDecision)
 		}
 		if !result.PolicyMet {
 			metrics.PolicyViolations.WithLabelValues(result.Profile, string(result.Method), string(result.Scenario), string(result.Decision), string(result.Reason)).Inc()
 			if r.Config.Policy.Enforce {
 				metrics.CycleTotal.WithLabelValues("policy_violation").Inc()
-				report := &CycleReport{CycleID: cycleID, Scenario: scenario, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}
+				report := &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}
 				return report, fmt.Errorf("runner: security policy violation: profile %s produced %s/%s; required %s", result.Profile, result.Decision, result.Reason, result.PolicyDecision)
 			}
 		}
@@ -230,7 +237,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	metrics.LastCycleTimestamp.Set(float64(time.Now().Unix()))
 	metrics.CycleTotal.WithLabelValues("ok").Inc()
 
-	return &CycleReport{CycleID: cycleID, Scenario: scenario, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}, nil
+	return &CycleReport{CycleID: cycleID, Scenario: scenario, ScenarioDigest: scenarioDigest, RevokeAckAt: revokeAckAt, Timeline: timeline, Artifacts: cycleArtifacts, Results: results}, nil
 }
 
 func (t *Timeline) derive() {
@@ -326,10 +333,11 @@ func (r *Runner) preflight(ctx context.Context, target profiles.Target) error {
 		if err != nil {
 			return fmt.Errorf("preflight: profile %s errored: %w", p.Name, err)
 		}
-		expectation, ok := p.Expected(target.Scenario)
+		contract, ok := r.Scenarios.Contract(target.Scenario, p.Name)
 		if !ok {
 			return fmt.Errorf("preflight: profile %s has no expectation for scenario %s", p.Name, target.Scenario)
 		}
+		expectation := contract.Baseline
 		if !expectation.MatchesBefore(observation) {
 			return fmt.Errorf("preflight: profile %s produced %s/%s, expected %s/%v for scenario %s", p.Name, observation.Decision, observation.Reason, expectation.Before, expectation.BeforeReasons, target.Scenario)
 		}
@@ -355,14 +363,14 @@ func (r *Runner) pollClients(ctx context.Context, target profiles.Target, revoke
 				select {
 				case <-ctx.Done():
 					mu.Lock()
-					results = append(results, harnessResult(p, target, revokedAt, ctx.Err()))
+					results = append(results, r.harnessResult(p, target, revokedAt, ctx.Err()))
 					mu.Unlock()
 					return
 				case <-stapleReady:
 				}
 				if err := stapleError(); err != nil {
 					mu.Lock()
-					results = append(results, harnessResult(p, target, revokedAt, err))
+					results = append(results, r.harnessResult(p, target, revokedAt, err))
 					mu.Unlock()
 					return
 				}
@@ -377,8 +385,9 @@ func (r *Runner) pollClients(ctx context.Context, target profiles.Target, revoke
 	return results
 }
 
-func harnessResult(p profiles.Profile, target profiles.Target, revokedAt time.Time, err error) profiles.Result {
-	expectation, _ := p.Expected(target.Scenario)
+func (r *Runner) harnessResult(p profiles.Profile, target profiles.Target, revokedAt time.Time, err error) profiles.Result {
+	contract, _ := r.Scenarios.Contract(target.Scenario, p.Name)
+	expectation := contract.Baseline
 	return profiles.Result{Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario, Decision: profiles.DecisionHarnessError, Reason: profiles.ReasonHarnessFailure, ExpectedDecision: expectation.After, ExpectedReasons: expectation.AfterReasons, CertificateSerial: target.CertificateSerial, RevokeAckAt: revokedAt, Err: err.Error()}
 }
 
@@ -410,14 +419,14 @@ func (r *Runner) pollOne(ctx context.Context, p profiles.Profile, target profile
 		if !firstAttempt.IsZero() {
 			result.ClientAttemptAt = firstAttempt
 		}
-		result = applyPolicy(p, target.Scenario, result)
+		result = r.applyPolicy(p, target.Scenario, result)
 	}()
 	deadline := time.Now().Add(r.Config.MaxWait)
 	attempts := 0
 	stapling := string(r.Stapling)
 	var lastErr error
 	lastObservation := profiles.Observation{Decision: profiles.DecisionInconclusive, Reason: profiles.ReasonHarnessFailure}
-	expectation, ok := p.Expected(target.Scenario)
+	contract, ok := r.Scenarios.Contract(target.Scenario, p.Name)
 	if !ok {
 		return profiles.Result{
 			Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario,
@@ -426,6 +435,7 @@ func (r *Runner) pollOne(ctx context.Context, p profiles.Profile, target profile
 			Err: fmt.Sprintf("profile has no expectation for scenario %s", target.Scenario),
 		}
 	}
+	expectation := contract.Baseline
 
 	for {
 		attempts++
@@ -505,12 +515,13 @@ func (r *Runner) pollOne(ctx context.Context, p profiles.Profile, target profile
 	}
 }
 
-func applyPolicy(profile profiles.Profile, scenario profiles.Scenario, result profiles.Result) profiles.Result {
-	policy, ok := profile.PolicyFor(scenario)
+func (r *Runner) applyPolicy(profile profiles.Profile, scenario profiles.Scenario, result profiles.Result) profiles.Result {
+	contract, ok := r.Scenarios.Contract(scenario, profile.Name)
 	if !ok {
-		result.PolicyMet = true
+		result.PolicyMet = false
 		return result
 	}
+	policy := contract.Policy
 	result.PolicyDecision = policy.After
 	result.PolicyReasons = policy.AfterReasons
 	result.PolicyMet = policy.MatchesAfter(profiles.Observation{Decision: result.Decision, Reason: result.Reason})

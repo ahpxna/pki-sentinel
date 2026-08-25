@@ -72,5 +72,5 @@ sufficient. Each mitigation below maps to a concrete feature in this repo:
 |---|---|
 | Prefer short-lived certificates | [ADR-0003](../adr/0003-short-lived-certs-over-revocation.md); 24h leaf TTL, 10m canary TTL |
 | Staple OCSP | `internal/canary/server.go` stapling modes (`on`/`off`/`stale`) |
-| Hard-fail on high-risk paths | `go-hardfail-ocsp` custom validator; documented scenario contracts in `internal/profiles/registry.go` |
+| Hard-fail on high-risk paths | `go-hardfail-ocsp` custom validator; documented scenario contracts in `scenarios/*.yaml` |
 | Monitor revocation enforcement continuously | The entire Assurance plane — `revocation-probe` running on a schedule, not as a one-off script |

@@ -91,6 +91,12 @@ public-key SHA-256. It can be verified without the controller. A local file
 key is only a demo integration; production keys belong behind an external KMS
 or HSM signing boundary.
 
+Scenario contracts are versioned YAML manifests in
+`services/revocation-probe/scenarios/`. They are decoded with a strict schema,
+validated against enabled profile implementations, canonically digested, and
+loaded before the controller begins a cycle. Profile implementations do not
+embed research expectations or policy contracts.
+
 ## Current boundaries
 
 - Vault is the implemented issuer adapter; the assurance model is not intended

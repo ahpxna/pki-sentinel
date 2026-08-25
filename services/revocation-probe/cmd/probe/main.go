@@ -29,6 +29,7 @@ import (
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/metrics"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/runner"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/scenarios"
 )
 
 func main() {
@@ -79,6 +80,7 @@ func cmdRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	once := fs.Bool("once", false, "run a single cycle and exit")
 	cfgPath := fs.String("config", "profiles.yaml", "path to profiles.yaml")
+	scenarioDir := fs.String("scenarios", "scenarios", "directory containing scenario manifests")
 	output := fs.String("output", "text", "output format: text|json")
 	interval := fs.Duration("interval", 15*time.Minute, "cycle interval when not --once")
 	stapling := fs.String("stapling", "on", "OCSP stapling mode: on|off|stale")
@@ -121,6 +123,13 @@ func cmdRun(args []string) {
 	if err := cfg.ValidateEnabledProfiles(knownProfiles); err != nil {
 		log.Fatalf("probe run: %v", err)
 	}
+	scenarioRegistry, err := scenarios.LoadDir(*scenarioDir, registry)
+	if err != nil {
+		log.Fatalf("probe run: loading scenarios: %v", err)
+	}
+	if err := scenarioRegistry.ValidateEnabledProfiles(cfg.EnabledNames()); err != nil {
+		log.Fatalf("probe run: validating scenarios: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -153,11 +162,12 @@ func cmdRun(args []string) {
 		log.Fatalf("probe run: %v", err)
 	}
 	r := &runner.Runner{
-		Issuer:   issuerClient,
-		Config:   cfg,
-		Profiles: profileRegistry,
-		Stapling: canary.StaplingMode(*stapling),
-		OCSPURL:  vaultPublicAddr + "/v1/pki_int/ocsp",
+		Issuer:    issuerClient,
+		Config:    cfg,
+		Profiles:  profileRegistry,
+		Scenarios: scenarioRegistry,
+		Stapling:  canary.StaplingMode(*stapling),
+		OCSPURL:   vaultPublicAddr + "/v1/pki_int/ocsp",
 		// Delta CRLs require base+delta merge semantics. The oracle consumes
 		// the complete issuer-signed CRL as its standalone source of truth.
 		CRLURL:            vaultPublicAddr + "/v1/pki_int/crl",
@@ -442,10 +452,18 @@ func cmdChaos(args []string) {
 		}
 	}
 
+	scenarioRegistry, err := scenarios.LoadDir("scenarios", profiles.Registry())
+	if err != nil {
+		log.Fatalf("chaos sweep: loading scenarios: %v", err)
+	}
+	if err := scenarioRegistry.ValidateEnabledProfiles(cfg.EnabledNames()); err != nil {
+		log.Fatalf("chaos sweep: validating scenarios: %v", err)
+	}
 	r := &runner.Runner{
 		Issuer:      issuerClient,
 		Config:      cfg,
 		Profiles:    profiles.Registry(),
+		Scenarios:   scenarioRegistry,
 		Stapling:    canary.StaplingOff,
 		OCSPURL:     faultProxy.URL() + ocspPath,
 		CRLURL:      vaultPublicAddr + "/v1/pki_int/crl",

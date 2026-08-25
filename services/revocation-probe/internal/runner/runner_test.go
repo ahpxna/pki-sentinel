@@ -9,21 +9,30 @@ import (
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/canary"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/config"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/scenarios"
 )
+
+func testScenarios(names ...string) *scenarios.Registry {
+	contracts := make(map[string]scenarios.Contract, len(names))
+	for _, name := range names {
+		contracts[name] = scenarios.Contract{
+			Baseline: profiles.Expectation{Before: profiles.DecisionAccept, After: profiles.DecisionReject, AfterReasons: []profiles.Reason{profiles.ReasonRevoked}},
+			Policy:   profiles.Expectation{After: profiles.DecisionReject, AfterReasons: []profiles.Reason{profiles.ReasonRevoked}},
+		}
+	}
+	return scenarios.New(scenarios.Manifest{ID: profiles.ScenarioRevokedStaple, Digest: "sha256:test", Profiles: contracts})
+}
 
 func TestPollOneHonorsMaxAttempts(t *testing.T) {
 	r := &Runner{Config: &config.Config{
 		PollInterval: time.Millisecond,
 		MaxWait:      time.Second,
 		MaxAttempts:  2,
-	}}
+	}, Scenarios: testScenarios("unexpected-accept")}
 	p := profiles.Profile{
 		Name:   "unexpected-accept",
 		Role:   profiles.RoleClientExecutor,
 		Method: profiles.MethodOCSPStapled,
-		Expectations: map[profiles.Scenario]profiles.Expectation{
-			profiles.ScenarioRevokedStaple: {Before: profiles.DecisionAccept, After: profiles.DecisionReject},
-		},
 		Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
 			return profiles.Observation{Decision: profiles.DecisionAccept, Reason: profiles.ReasonStatusGood}, nil
 		},
@@ -40,14 +49,11 @@ func TestPollOneDoesNotConvertHarnessErrorToSoftFail(t *testing.T) {
 		PollInterval: time.Millisecond,
 		MaxWait:      time.Second,
 		MaxAttempts:  1,
-	}}
+	}, Scenarios: testScenarios("broken")}
 	p := profiles.Profile{
 		Name:   "broken",
 		Role:   profiles.RoleStatusOracle,
 		Method: profiles.MethodCRL,
-		Expectations: map[profiles.Scenario]profiles.Expectation{
-			profiles.ScenarioRevokedStaple: {Before: profiles.DecisionAccept, After: profiles.DecisionReject},
-		},
 		Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
 			return profiles.Observation{Decision: profiles.DecisionHarnessError, Reason: profiles.ReasonHarnessFailure}, errors.New("invalid harness configuration")
 		},
@@ -81,17 +87,14 @@ func TestPollClientsDoesNotWaitForStapleBeforeRunningIndependentClient(t *testin
 			{Name: "independent", Enabled: true, Timeout: time.Second},
 			{Name: "stapled", Enabled: true, Timeout: time.Second},
 		},
-	}, Stapling: canary.StaplingOn}
-	expectations := map[profiles.Scenario]profiles.Expectation{
-		profiles.ScenarioRevokedStaple: {Before: profiles.DecisionAccept, After: profiles.DecisionReject, AfterReasons: []profiles.Reason{profiles.ReasonRevoked}},
-	}
+	}, Stapling: canary.StaplingOn, Scenarios: testScenarios("independent", "stapled")}
 	independentStarted := make(chan struct{})
 	clientProfiles := []profiles.Profile{
-		{Name: "independent", Role: profiles.RoleClientExecutor, Method: profiles.MethodNone, Expectations: expectations, Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
+		{Name: "independent", Role: profiles.RoleClientExecutor, Method: profiles.MethodNone, Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
 			close(independentStarted)
 			return profiles.Observation{Decision: profiles.DecisionReject, Reason: profiles.ReasonRevoked}, nil
 		}},
-		{Name: "stapled", Role: profiles.RoleClientExecutor, Method: profiles.MethodOCSPStapled, Expectations: expectations, Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
+		{Name: "stapled", Role: profiles.RoleClientExecutor, Method: profiles.MethodOCSPStapled, Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
 			return profiles.Observation{Decision: profiles.DecisionReject, Reason: profiles.ReasonRevoked}, nil
 		}},
 	}

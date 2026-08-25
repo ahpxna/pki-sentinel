@@ -60,7 +60,7 @@ func Sign(privateKeyPEM []byte, payload any, now time.Time) (Envelope, error) {
 		Version:         Version,
 		IssuedAt:        now.UTC(),
 		RunID:           jsonField(payloadJSON, "cycle_id"),
-		ScenarioDigest:  digestJSONField(payloadJSON, "scenario"),
+		ScenarioDigest:  jsonField(payloadJSON, "scenario_digest"),
 		PayloadSHA256:   hex.EncodeToString(payloadHash[:]),
 		PublicKeySHA256: hex.EncodeToString(publicKeyHash[:]),
 	}
@@ -117,15 +117,6 @@ func jsonField(payload json.RawMessage, field string) string {
 		return ""
 	}
 	return value
-}
-
-func digestJSONField(payload json.RawMessage, field string) string {
-	var values map[string]json.RawMessage
-	if json.Unmarshal(payload, &values) != nil || len(values[field]) == 0 {
-		return ""
-	}
-	digest := sha256.Sum256(values[field])
-	return hex.EncodeToString(digest[:])
 }
 
 // ReadPrivateKey reads an Ed25519 PKCS#8 private-key PEM file.

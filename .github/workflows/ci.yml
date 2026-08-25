@@ -98,6 +98,10 @@ jobs:
       - name: go test
         working-directory: services/${{ matrix.service }}
         run: go test ./... -race -coverprofile=coverage.out
+      - name: validate scenario manifests
+        if: matrix.service == 'revocation-probe'
+        working-directory: services/revocation-probe
+        run: go test ./internal/scenarios -run '^TestProductionManifestsValidateAndHaveStableDigests$'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-${{ matrix.service }}

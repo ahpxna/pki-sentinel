@@ -1,0 +1,24 @@
+id: missing_staple
+version: 1
+evidence_dependencies:
+  openssl-ocsp-direct: [issuer_ack]
+  crl-check: [issuer_ack]
+  curl-cert-status: [issuer_ack]
+  go-hardfail-ocsp: [issuer_ack]
+  curl-default: [issuer_ack]
+  go-tls-default: [issuer_ack]
+  python-requests: [issuer_ack]
+profiles:
+  openssl-ocsp-direct: &oracle
+    baseline: {before: {decision: ACCEPT, reasons: [STATUS_GOOD]}, after: {decision: REJECT, reasons: [REVOKED]}}
+    policy: &reject_policy {after: {decision: REJECT, reasons: [REVOKED, MISSING_STATUS, INVALID_STATUS, STALE_STATUS, FUTURE_STATUS, UNKNOWN_STATUS, MISSING_FRESHNESS_BOUND]}}
+  crl-check: *oracle
+  curl-cert-status: &missing
+    baseline: {before: {decision: REJECT, reasons: [MISSING_STATUS]}, after: {decision: REJECT, reasons: [MISSING_STATUS]}}
+    policy: *reject_policy
+  go-hardfail-ocsp: *missing
+  curl-default: &no_check
+    baseline: {before: {decision: ACCEPT, reasons: [NO_REVOCATION_CHECK]}, after: {decision: ACCEPT, reasons: [NO_REVOCATION_CHECK]}}
+    policy: *reject_policy
+  go-tls-default: *no_check
+  python-requests: *no_check

@@ -19,6 +19,7 @@ RUN apk add --no-cache curl openssl python3 py3-requests ca-certificates \
     && addgroup -g 10001 -S probe && adduser -S -D -H -u 10001 -G probe probe
 COPY --from=builder /out/probe /usr/local/bin/probe
 COPY profiles.yaml /etc/pki-sentinel/profiles.yaml
+COPY scenarios /etc/pki-sentinel/scenarios
 WORKDIR /etc/pki-sentinel
 # hadolint ignore=DL3066
 USER probe

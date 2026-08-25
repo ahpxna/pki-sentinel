@@ -59,8 +59,9 @@ const (
 	MethodNone        CheckMethod = "none"
 )
 
-// Scenario identifies a stable assurance experiment. Values are bounded so
-// they are safe to use as Prometheus labels.
+// Scenario identifies a stable assurance experiment. The executable profile
+// implementation does not own scenario contracts; they are loaded from the
+// versioned scenario manifests.
 type Scenario string
 
 const (
@@ -175,26 +176,11 @@ func (e Expectation) MatchesAfter(observation Observation) bool {
 
 // Profile is one status oracle or relying-party client executor.
 type Profile struct {
-	Name         string
-	Role         Role
-	Method       CheckMethod
-	Description  string
-	Expectations map[Scenario]Expectation
-	// Policy defines the organizational security requirement. It is evaluated
-	// independently of the expected implementation behavior.
-	Policy map[Scenario]Expectation
-	Probe  func(ctx context.Context, target Target) (Observation, error)
-}
-
-func (p Profile) PolicyFor(scenario Scenario) (Expectation, bool) {
-	expectation, ok := p.Policy[scenario]
-	return expectation, ok
-}
-
-// Expected returns the scenario-specific contract for this profile.
-func (p Profile) Expected(scenario Scenario) (Expectation, bool) {
-	expectation, ok := p.Expectations[scenario]
-	return expectation, ok
+	Name        string
+	Role        Role
+	Method      CheckMethod
+	Description string
+	Probe       func(ctx context.Context, target Target) (Observation, error)
 }
 
 // Result is the durable evidence record for one profile in one cycle.

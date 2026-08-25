@@ -18,24 +18,33 @@ meaning of existing measurements.
 
 ## Phase 1: declarative scenarios
 
-Replace hard-coded profile expectations with versioned YAML manifests. A
-manifest must specify:
+Implemented in [`services/revocation-probe/scenarios/`](../services/revocation-probe/scenarios/).
+Each version-1 manifest is a strict YAML input; its canonical JSON SHA-256 is
+reported as `scenario_digest` and bound into the signed attestation statement.
+The runtime rejects unknown fields, decisions, reasons, evidence dependencies,
+duplicate scenarios or profile keys, and contracts missing an enabled profile.
+
+The three baseline manifests preserve the established `revoked_staple`,
+`missing_staple`, and `cached_good_staple` observations:
 
 ```yaml
-id: revoked-staple-v1
+id: revoked_staple
+version: 1
 evidence_dependencies:
-  ocsp_direct: issuer_acknowledgement
-  crl: issuer_acknowledgement
-  ocsp_stapled: staple_published
+  openssl-ocsp-direct: [issuer_ack]
+  curl-cert-status: [staple_published]
 profiles:
   go-hardfail-ocsp:
-    baseline: { decision: REJECT, reasons: [REVOKED] }
-    policy:   { decision: REJECT, reasons: [REVOKED, MISSING_STATUS, INVALID_STATUS, STALE_STATUS] }
+    baseline:
+      before: {decision: ACCEPT, reasons: [STATUS_GOOD]}
+      after: {decision: REJECT, reasons: [REVOKED]}
+    policy:
+      after: {decision: REJECT, reasons: [REVOKED, MISSING_STATUS, INVALID_STATUS, STALE_STATUS, FUTURE_STATUS, UNKNOWN_STATUS, MISSING_FRESHNESS_BOUND]}
 ```
 
-CI should validate the manifest schema, require each enabled profile to have a
-baseline and policy contract, and archive the manifest digest with the signed
-cycle report.
+CI validates the production manifests and the unit suite asserts exact parity
+with the pre-manifest contracts. The `probe run --scenarios <directory>` flag
+allows an experiment to select a manifest directory explicitly.
 
 ## Phase 2: client diversity matrix
 

@@ -165,23 +165,6 @@ func clientFingerprint(client string) (string, string) {
 
 var runtimeVersion = runtime.Version
 
-func allScenarioExpectations(before Decision, beforeReason Reason, after Decision, afterReason Reason) map[Scenario]Expectation {
-	return map[Scenario]Expectation{
-		ScenarioRevokedStaple:    {Before: before, BeforeReasons: []Reason{beforeReason}, After: after, AfterReasons: []Reason{afterReason}},
-		ScenarioMissingStaple:    {Before: before, BeforeReasons: []Reason{beforeReason}, After: after, AfterReasons: []Reason{afterReason}},
-		ScenarioCachedGoodStaple: {Before: before, BeforeReasons: []Reason{beforeReason}, After: after, AfterReasons: []Reason{afterReason}},
-	}
-}
-
-func rejectPolicy() map[Scenario]Expectation {
-	allowed := []Reason{ReasonRevoked, ReasonMissingStatus, ReasonInvalidStatus, ReasonStaleStatus, ReasonFutureStatus, ReasonUnknownStatus, ReasonMissingFreshness}
-	return map[Scenario]Expectation{
-		ScenarioRevokedStaple:    {After: DecisionReject, AfterReasons: allowed},
-		ScenarioMissingStaple:    {After: DecisionReject, AfterReasons: allowed},
-		ScenarioCachedGoodStaple: {After: DecisionReject, AfterReasons: allowed},
-	}
-}
-
 func exitCode(err error) int {
 	if err == nil {
 		return 0
@@ -231,12 +214,10 @@ func Registry() []Profile {
 
 func opensslOCSPDirect() Profile {
 	return Profile{
-		Name:         "openssl-ocsp-direct",
-		Role:         RoleStatusOracle,
-		Method:       MethodOCSPDirect,
-		Description:  "openssl ocsp -issuer chain.pem -cert leaf.pem -url <ocsp_url>",
-		Expectations: allScenarioExpectations(DecisionAccept, ReasonStatusGood, DecisionReject, ReasonRevoked),
-		Policy:       rejectPolicy(),
+		Name:        "openssl-ocsp-direct",
+		Role:        RoleStatusOracle,
+		Method:      MethodOCSPDirect,
+		Description: "openssl ocsp -issuer chain.pem -cert leaf.pem -url <ocsp_url>",
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			started := time.Now()
 			metrics.OCSPResponderUp.Set(0)
@@ -326,12 +307,6 @@ func curlCertStatus() Profile {
 		Role:        RoleClientExecutor,
 		Method:      MethodOCSPStapled,
 		Description: "curl --cacert chain.pem --cert-status https://<host>/",
-		Expectations: map[Scenario]Expectation{
-			ScenarioRevokedStaple:    {Before: DecisionAccept, BeforeReasons: []Reason{ReasonStatusGood}, After: DecisionReject, AfterReasons: []Reason{ReasonRevoked, ReasonInvalidStatus}},
-			ScenarioMissingStaple:    {Before: DecisionReject, BeforeReasons: []Reason{ReasonMissingStatus}, After: DecisionReject, AfterReasons: []Reason{ReasonMissingStatus}},
-			ScenarioCachedGoodStaple: {Before: DecisionAccept, BeforeReasons: []Reason{ReasonStatusGood}, After: DecisionAccept, AfterReasons: []Reason{ReasonStatusGood}},
-		},
-		Policy: rejectPolicy(),
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			chainPath, cleanup, err := writeTemp("chain-*.pem", []byte(target.CAChainPEM))
 			if err != nil {
@@ -358,12 +333,10 @@ func curlCertStatus() Profile {
 
 func curlDefault() Profile {
 	return Profile{
-		Name:         "curl-default",
-		Role:         RoleClientExecutor,
-		Method:       MethodNone,
-		Description:  "curl --cacert chain.pem https://<host>/",
-		Expectations: allScenarioExpectations(DecisionAccept, ReasonNoRevocationCheck, DecisionAccept, ReasonNoRevocationCheck),
-		Policy:       rejectPolicy(),
+		Name:        "curl-default",
+		Role:        RoleClientExecutor,
+		Method:      MethodNone,
+		Description: "curl --cacert chain.pem https://<host>/",
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			chainPath, cleanup, err := writeTemp("chain-*.pem", []byte(target.CAChainPEM))
 			if err != nil {
@@ -396,12 +369,10 @@ func curlDefault() Profile {
 
 func goTLSDefault() Profile {
 	return Profile{
-		Name:         "go-tls-default",
-		Role:         RoleClientExecutor,
-		Method:       MethodNone,
-		Description:  "in-process crypto/tls dial with RootCAs",
-		Expectations: allScenarioExpectations(DecisionAccept, ReasonNoRevocationCheck, DecisionAccept, ReasonNoRevocationCheck),
-		Policy:       rejectPolicy(),
+		Name:        "go-tls-default",
+		Role:        RoleClientExecutor,
+		Method:      MethodNone,
+		Description: "in-process crypto/tls dial with RootCAs",
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			pool := x509.NewCertPool()
 			pool.AppendCertsFromPEM([]byte(target.CAChainPEM))
@@ -429,12 +400,6 @@ func goTLSOCSP() Profile {
 		Role:        RoleClientExecutor,
 		Method:      MethodOCSPStapled,
 		Description: "custom hard-fail validator over crypto/tls OCSPResponse",
-		Expectations: map[Scenario]Expectation{
-			ScenarioRevokedStaple:    {Before: DecisionAccept, BeforeReasons: []Reason{ReasonStatusGood}, After: DecisionReject, AfterReasons: []Reason{ReasonRevoked}},
-			ScenarioMissingStaple:    {Before: DecisionReject, BeforeReasons: []Reason{ReasonMissingStatus}, After: DecisionReject, AfterReasons: []Reason{ReasonMissingStatus}},
-			ScenarioCachedGoodStaple: {Before: DecisionAccept, BeforeReasons: []Reason{ReasonStatusGood}, After: DecisionAccept, AfterReasons: []Reason{ReasonStatusGood}},
-		},
-		Policy: rejectPolicy(),
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			pool := x509.NewCertPool()
 			pool.AppendCertsFromPEM([]byte(target.CAChainPEM))
@@ -493,12 +458,10 @@ func goTLSOCSP() Profile {
 
 func pythonRequests() Profile {
 	return Profile{
-		Name:         "python-requests",
-		Role:         RoleClientExecutor,
-		Method:       MethodNone,
-		Description:  `python3 -c script with verify=chain.pem`,
-		Expectations: allScenarioExpectations(DecisionAccept, ReasonNoRevocationCheck, DecisionAccept, ReasonNoRevocationCheck),
-		Policy:       rejectPolicy(),
+		Name:        "python-requests",
+		Role:        RoleClientExecutor,
+		Method:      MethodNone,
+		Description: `python3 -c script with verify=chain.pem`,
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			chainPath, cleanup, err := writeTemp("chain-*.pem", []byte(target.CAChainPEM))
 			if err != nil {
@@ -538,12 +501,10 @@ print(r.status_code)
 
 func crlCheck() Profile {
 	return Profile{
-		Name:         "crl-check",
-		Role:         RoleStatusOracle,
-		Method:       MethodCRL,
-		Description:  "download full CRL, verify issuer signature and freshness, then check serial",
-		Expectations: allScenarioExpectations(DecisionAccept, ReasonStatusGood, DecisionReject, ReasonRevoked),
-		Policy:       rejectPolicy(),
+		Name:        "crl-check",
+		Role:        RoleStatusOracle,
+		Method:      MethodCRL,
+		Description: "download full CRL, verify issuer signature and freshness, then check serial",
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			leafPEM, err := fetchLeafPEM(ctx, target)
 			if err != nil {
