@@ -37,7 +37,7 @@
   <rule id="100103" level="8">
     <decoded_as>json</decoded_as>
     <field name="request.path">^auth/</field>
-    <field name="error">.+</field>
+    <field name="error">permission denied</field>
     <description>Vault auth failure.</description>
     <group>authentication_failed,</group>
   </rule>
