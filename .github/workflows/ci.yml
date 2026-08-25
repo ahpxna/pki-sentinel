@@ -160,7 +160,7 @@ jobs:
           (cd services/truststore-drift-agent && go build -o bin/truststore-drift-agent .)
       - name: run one probe cycle
         run: |
-          docker compose exec -T -u 0 revocation-probe sh -ec '
+          docker exec -i -u 0 pki-revocation-probe sh -ec '
             umask 077
             chown probe:probe /run/attestation
             chmod 0700 /run/attestation
