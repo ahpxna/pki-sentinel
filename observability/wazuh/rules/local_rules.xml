@@ -11,8 +11,11 @@
 <group name="pki-sentinel,vault_audit,">
 
   <rule id="100100" level="0">
-    <decoded_as>vault-audit</decoded_as>
-    <field name="type">.+</field>
+    <!-- Wazuh's built-in JSON decoder has precedence over custom JSON
+         decoders. request.path distinguishes Vault audit records from other
+         JSON events without depending on decoder ordering. -->
+    <decoded_as>json</decoded_as>
+    <field name="request.path">.+</field>
     <description>Vault audit event.</description>
   </rule>
 
