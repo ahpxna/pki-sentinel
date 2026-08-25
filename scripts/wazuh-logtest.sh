@@ -22,14 +22,16 @@ run_fixture() {
   local expected_rule="$1"
   local fixture="$2"
   local output
-  # Override the image entrypoint so the test uses the manager's built-in
-  # logtest tool directly. The active rule locations are mounted only for this
-  # ephemeral container; the normal Wazuh service continues to use its staged
-  # configuration mount during runtime initialization.
+  # The image keeps its initial manager configuration in data_tmp until its
+  # normal startup entrypoint restores it. Recreate only that configuration
+  # step, layer the staged local rules on top, then execute logtest. Starting
+  # the complete manager service is unnecessary for an isolated rule session.
   if ! output="$("${COMPOSE[@]}" run --rm --no-deps -T \
-    --volume "${REPO_ROOT}/observability/wazuh/decoders/vault_audit.xml:/var/ossec/etc/decoders/vault_audit.xml:ro" \
-    --volume "${REPO_ROOT}/observability/wazuh/rules/local_rules.xml:/var/ossec/etc/rules/local_rules.xml:ro" \
-    --entrypoint /var/ossec/bin/wazuh-logtest wazuh-manager < "${fixture}" 2>&1)"; then
+    --entrypoint /bin/bash wazuh-manager -euc '
+      cp -a /var/ossec/data_tmp/permanent/var/ossec/etc/. /var/ossec/etc/
+      cp -a /wazuh-config-mount/etc/. /var/ossec/etc/
+      exec /var/ossec/bin/wazuh-logtest
+    ' < "${fixture}" 2>&1)"; then
     printf '%s\n' "${output}" >&2
     echo "wazuh-logtest failed for ${fixture}" >&2
     return 1
