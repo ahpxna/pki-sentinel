@@ -19,6 +19,10 @@ services:
     container_name: pki-wazuh-manager
     profiles: ["wazuh"]
     networks: [pki-sentinel]
+    ulimits:
+      nofile:
+        soft: 655360
+        hard: 655360
     volumes:
       # Wazuh 4.8.x seeds /var/ossec/etc during container initialization. A
       # direct nested bind mount under /var/ossec/etc makes that directory look
