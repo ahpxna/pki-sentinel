@@ -40,6 +40,20 @@ services:
       - ./.data/evidence:/evidence
     restart: "no"
 
+  attestation-init:
+    image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/revocation-probe:local
+    build:
+      context: ./services/revocation-probe
+    container_name: pki-attestation-init
+    profiles: ["app"]
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["mkdir -p /attestation && chown -R 10001:10001 /attestation && chmod 0700 /attestation"]
+    volumes:
+      - ./.data/attestation:/attestation
+    restart: "no"
+
   # Demo stand-in for a cloud KMS. Holds a transit key used to auto-unseal the
   # primary Vault. In production this would be AWS/GCP/Azure KMS or an HSM —
   # see docs/adr/0002-auto-unseal-tradeoffs.md.
@@ -232,6 +246,8 @@ services:
     restart: unless-stopped
     depends_on:
       evidence-init:
+        condition: service_completed_successfully
+      attestation-init:
         condition: service_completed_successfully
       vault:
         condition: service_healthy

@@ -119,6 +119,8 @@ jobs:
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.9.5"
+      - name: generate integration attestation key
+        run: ./scripts/generate-attestation-key.sh
       - name: start stack
         run: |
           cp .env.example .env
@@ -160,16 +162,6 @@ jobs:
           (cd services/truststore-drift-agent && go build -o bin/truststore-drift-agent .)
       - name: run one probe cycle
         run: |
-          docker exec -i -u 0 pki-revocation-probe sh -ec '
-            umask 077
-            chown probe:probe /run/attestation
-            chmod 0700 /run/attestation
-            openssl genpkey -algorithm ED25519 -out /run/attestation/assurance.key
-            openssl pkey -in /run/attestation/assurance.key -pubout -out /run/attestation/assurance.pub
-            chown probe:probe /run/attestation/assurance.key /run/attestation/assurance.pub
-            chmod 0600 /run/attestation/assurance.key
-            chmod 0644 /run/attestation/assurance.pub
-          '
           if ! docker compose exec -T revocation-probe \
             probe run --once --output json \
               --attestation-key /run/attestation/assurance.key \
