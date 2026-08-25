@@ -26,7 +26,7 @@ Implemented in [`services/revocation-probe/scenarios/`](../services/revocation-p
 Each version-1 manifest is a strict YAML input; its canonical JSON SHA-256 is
 reported as `scenario_digest` and bound into the signed attestation statement.
 The runtime rejects unknown fields, decisions, reasons, evidence dependencies,
-duplicate scenarios or profile keys, duplicate/empty reason or dependency
+duplicate scenario or profile declarations, duplicate/empty reason or dependency
 lists, incompatible decision/reason pairs, orphan dependency declarations,
 contracts missing an enabled profile, and publication dependencies with no
 enabled status-oracle producer.

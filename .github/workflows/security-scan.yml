@@ -41,7 +41,7 @@ jobs:
             exit 1
           fi
       - name: scan repository history
-        run: gitleaks git --no-banner --redact --verbose .
+        run: gitleaks git --config .gitleaks.toml --no-banner --redact --verbose .
 
   fs-scan:
     runs-on: ubuntu-latest

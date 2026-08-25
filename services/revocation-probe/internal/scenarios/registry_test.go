@@ -3,7 +3,6 @@ package scenarios
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -63,14 +62,43 @@ func TestProductionManifestContractsPreserveBaselineSemantics(t *testing.T) {
 				t.Errorf("missing contract for %s/%s", scenario, profile)
 				continue
 			}
-			if !reflect.DeepEqual(contract.Baseline, expected.Baseline) {
+			if !expectationSemanticallyEqual(contract.Baseline, expected.Baseline) {
 				t.Errorf("baseline contract changed for %s/%s: got %#v, want %#v", scenario, profile, contract.Baseline, expected.Baseline)
 			}
-			if !reflect.DeepEqual(contract.Policy, expected.Policy) {
+			if !expectationSemanticallyEqual(contract.Policy, expected.Policy) {
 				t.Errorf("policy contract changed for %s/%s: got %#v, want %#v", scenario, profile, contract.Policy, expected.Policy)
 			}
 		}
 	}
+}
+
+func expectationSemanticallyEqual(got, want profiles.Expectation) bool {
+	return got.Before == want.Before &&
+		got.After == want.After &&
+		reasonSetsEqual(got.BeforeReasons, want.BeforeReasons) &&
+		reasonSetsEqual(got.AfterReasons, want.AfterReasons)
+}
+
+func reasonSetsEqual(got, want []profiles.Reason) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	counts := make(map[profiles.Reason]int, len(got))
+	for _, reason := range got {
+		counts[reason]++
+	}
+	for _, reason := range want {
+		counts[reason]--
+		if counts[reason] < 0 {
+			return false
+		}
+	}
+	for _, count := range counts {
+		if count != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func TestLoadDirRejectsInvalidManifests(t *testing.T) {

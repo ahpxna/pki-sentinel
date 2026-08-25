@@ -3,6 +3,15 @@ title = "pki-sentinel gitleaks config"
 [extend]
 useDefault = true
 
-# No custom allowlist entries yet. Any addition here MUST include a dated
-# justification comment per Appendix B / Step 5.2 — unjustified ignores are
-# worse than no scanning.
+# 2026-08-25: Gitleaks generic-api-key false-positive in commit 62b3b25b...
+# The matched text is schema documentation, not credential material. Keep this
+# exception scoped to the exact rule, introducing commit, path, and prose line
+# so real generic API-key findings elsewhere remain blocking.
+[[allowlists]]
+description = "M1 scenario-schema documentation prose false positive"
+targetRules = ["generic-api-key"]
+condition = "AND"
+commits = ["62b3b25b45cbe65abba9b5ad43f6357bae508bdf"]
+paths = ['''^docs/experiments\.md$''']
+regexTarget = "line"
+regexes = ['''duplicate scenarios or profile keys, duplicate/empty reason or dependency''']
