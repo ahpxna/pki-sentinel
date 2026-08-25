@@ -29,7 +29,7 @@
   <rule id="100102" level="12">
     <decoded_as>json</decoded_as>
     <field name="request.path">^pki_root/</field>
-    <field name="request.operation">^(create|update|delete)$</field>
+    <regex>operation.*(create|update|delete)</regex>
     <description>Root CA mount written — should essentially never happen after initial bootstrap.</description>
     <group>pki_root_write,</group>
   </rule>
@@ -52,7 +52,7 @@
   <rule id="100105" level="10">
     <decoded_as>json</decoded_as>
     <field name="request.path">^sys/policy</field>
-    <field name="request.operation">^(create|update|delete)$</field>
+    <regex>operation.*(create|update|delete)</regex>
     <description>Vault policy modified.</description>
     <group>pki_policy_change,</group>
   </rule>
