@@ -126,14 +126,6 @@ func profileNames(implementations []profiles.Profile) []string {
 	return names
 }
 
-func accept(reason profiles.Reason) profiles.Observation {
-	return profiles.Observation{Decision: profiles.DecisionAccept, Reason: reason}
-}
-
-func reject(reason profiles.Reason) profiles.Observation {
-	return profiles.Observation{Decision: profiles.DecisionReject, Reason: reason}
-}
-
 func baselineContracts() map[profiles.Scenario]map[string]Contract {
 	policy := profiles.Expectation{After: profiles.DecisionReject, AfterReasons: []profiles.Reason{
 		profiles.ReasonRevoked, profiles.ReasonMissingStatus, profiles.ReasonInvalidStatus, profiles.ReasonStaleStatus,
