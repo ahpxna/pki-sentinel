@@ -120,7 +120,9 @@ jobs:
         with:
           terraform_version: "1.9.5"
       - name: generate integration attestation key
-        run: ./scripts/generate-attestation-key.sh
+        run: |
+          ./scripts/generate-attestation-key.sh
+          sudo chown -R 10001:10001 .data/attestation
       - name: start stack
         run: |
           cp .env.example .env
@@ -169,13 +171,15 @@ jobs:
           docker compose exec -T revocation-probe \
             probe attest verify --public-key /run/attestation/assurance.pub \
               --input /run/attestation/last-cycle.attestation.json
+          sudo install -m 0644 .data/attestation/assurance.pub /tmp/assurance.pub
+          sudo install -m 0644 .data/attestation/last-cycle.attestation.json /tmp/last-cycle.attestation.json
           cat /tmp/cycle.json
       - name: go test -tags=integration
         working-directory: tests/integration
         env:
           PROBE_REPORT: /tmp/cycle.json
-          PROBE_ATTESTATION: ../../.data/attestation/last-cycle.attestation.json
-          PROBE_ATTESTATION_PUBLIC_KEY: ../../.data/attestation/assurance.pub
+          PROBE_ATTESTATION: /tmp/last-cycle.attestation.json
+          PROBE_ATTESTATION_PUBLIC_KEY: /tmp/assurance.pub
         run: go test -tags=integration ./... -v
       - name: install conftest for the live Terraform-plan policy gate
         run: |
