@@ -119,10 +119,6 @@ jobs:
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.9.5"
-      - name: generate integration attestation key
-        run: |
-          ./scripts/generate-attestation-key.sh
-          sudo chown -R 10001:10001 .data/attestation
       - name: start stack
         run: |
           cp .env.example .env
@@ -164,6 +160,16 @@ jobs:
           (cd services/truststore-drift-agent && go build -o bin/truststore-drift-agent .)
       - name: run one probe cycle
         run: |
+          docker compose exec -T -u 0 revocation-probe sh -ec '
+            umask 077
+            chown probe:probe /run/attestation
+            chmod 0700 /run/attestation
+            openssl genpkey -algorithm ED25519 -out /run/attestation/assurance.key
+            openssl pkey -in /run/attestation/assurance.key -pubout -out /run/attestation/assurance.pub
+            chown probe:probe /run/attestation/assurance.key /run/attestation/assurance.pub
+            chmod 0600 /run/attestation/assurance.key
+            chmod 0644 /run/attestation/assurance.pub
+          '
           if ! docker compose exec -T revocation-probe \
             probe run --once --output json \
               --attestation-key /run/attestation/assurance.key \
@@ -179,8 +185,8 @@ jobs:
           docker compose exec -T revocation-probe \
             probe attest verify --public-key /run/attestation/assurance.pub \
               --input /run/attestation/last-cycle.attestation.json
-          sudo install -m 0644 .data/attestation/assurance.pub /tmp/assurance.pub
-          sudo install -m 0644 .data/attestation/last-cycle.attestation.json /tmp/last-cycle.attestation.json
+          docker compose exec -T revocation-probe cat /run/attestation/assurance.pub > /tmp/assurance.pub
+          docker compose exec -T revocation-probe cat /run/attestation/last-cycle.attestation.json > /tmp/last-cycle.attestation.json
           cat /tmp/cycle.json
       - name: go test -tags=integration
         working-directory: tests/integration
