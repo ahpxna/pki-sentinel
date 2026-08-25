@@ -28,6 +28,7 @@ run_fixture() {
   # the complete manager service is unnecessary for an isolated rule session.
   if ! output="$("${COMPOSE[@]}" run --rm --no-deps -T \
     --entrypoint /bin/bash wazuh-manager -euc '
+      mkdir -p /var/ossec/etc
       cp -a /var/ossec/data_tmp/permanent/var/ossec/etc/. /var/ossec/etc/
       cp -a /wazuh-config-mount/etc/. /var/ossec/etc/
       exec /var/ossec/bin/wazuh-logtest
