@@ -121,6 +121,16 @@ jobs:
           terraform_version: "1.9.5"
       - name: generate integration attestation key
         run: ./scripts/generate-attestation-key.sh
+      - name: prepare attestation bind-mount ownership
+        run: |
+          # revocation-probe is pinned to UID/GID 10001:10001. Linux bind mounts
+          # preserve host numeric ownership, while the generated private key is
+          # intentionally 0600. Hand only this ignored CI fixture directory to
+          # the non-root probe instead of weakening the private-key mode.
+          sudo chown -R 10001:10001 .data/attestation
+          sudo chmod 0700 .data/attestation
+          sudo chmod 0600 .data/attestation/assurance.key
+          sudo chmod 0644 .data/attestation/assurance.pub
       - name: start stack
         run: |
           cp .env.example .env
