@@ -26,7 +26,10 @@
   <rule id="100102" level="12">
     <if_sid>100100</if_sid>
     <field name="request.path">^pki_root/</field>
-    <field name="request.operation">^(create|update|delete)$</field>
+    <!-- Wazuh 4.8.2 rejects request.operation as a field selector in this
+         ruleset (analysisd error 5107). Match the operation in raw JSON while
+         retaining request.path as the structural selector. -->
+    <regex type="pcre2">&quot;operation&quot;\s*:\s*&quot;(?:create|update|delete)&quot;</regex>
     <description>Root CA mount written — should essentially never happen after initial bootstrap.</description>
     <group>pki_root_write,</group>
   </rule>
@@ -49,7 +52,7 @@
   <rule id="100105" level="10">
     <if_sid>100100</if_sid>
     <field name="request.path">^sys/policy</field>
-    <field name="request.operation">^(create|update|delete)$</field>
+    <regex type="pcre2">&quot;operation&quot;\s*:\s*&quot;(?:create|update|delete)&quot;</regex>
     <description>Vault policy modified.</description>
     <group>pki_policy_change,</group>
   </rule>

@@ -17,12 +17,12 @@ resource "vault_generic_endpoint" "int_crl_config" {
   ignore_absent_fields = true
 
   data_json = jsonencode({
-    expiry                    = "72h"
-    disable                   = false
-    ocsp_disable              = false
-    ocsp_expiry               = "1h"
-    auto_rebuild              = false
-    enable_delta              = false
+    expiry        = "72h"
+    disable       = false
+    ocsp_disable  = false
+    ocsp_expiry   = "1h"
+    auto_rebuild  = false
+    enable_delta  = false
   })
 
   depends_on = [vault_pki_secret_backend_intermediate_set_signed.int]

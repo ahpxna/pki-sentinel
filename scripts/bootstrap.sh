@@ -91,13 +91,21 @@ if [[ -f "${TF_TOKEN_FILE}" ]]; then
   fi
 fi
 
-if [[ -z "${TF_TOKEN}" && -f "${TF_APPROLE_FILE}" ]]; then
+terraform_approle_login() {
+  local role_id secret_id token
+  [[ -f "${TF_APPROLE_FILE}" ]] || return 1
   role_id="$(sed -n 's/^VAULT_ROLE_ID=//p' "${TF_APPROLE_FILE}")"
   secret_id="$(sed -n 's/^VAULT_SECRET_ID=//p' "${TF_APPROLE_FILE}")"
-  TF_TOKEN="$(curl -s --request POST \
+  [[ -n "${role_id}" && -n "${secret_id}" ]] || return 1
+  token="$(curl -fsS --request POST \
     --data "$(jq -n --arg role_id "${role_id}" --arg secret_id "${secret_id}" '{role_id:$role_id,secret_id:$secret_id}')" \
-    "${VAULT_ADDR}/v1/auth/approle/login" | jq -r '.auth.client_token // empty')"
-  if token_is_valid "${TF_TOKEN}"; then
+    "${VAULT_ADDR}/v1/auth/approle/login" | jq -r '.auth.client_token // empty')" || return 1
+  token_is_valid "${token}" || return 1
+  printf '%s' "${token}"
+}
+
+if [[ -z "${TF_TOKEN}" && -f "${TF_APPROLE_FILE}" ]]; then
+  if TF_TOKEN="$(terraform_approle_login)"; then
     printf '%s' "${TF_TOKEN}" > "${TF_TOKEN_FILE}"
     chmod 600 "${TF_TOKEN_FILE}"
     echo "[bootstrap] 6/9 obtained a fresh Terraform token through AppRole."
@@ -139,6 +147,20 @@ echo "[bootstrap] 7/9 running terraform apply against terraform/bootstrap..."
 echo "[bootstrap] 8/9 starting application services with generated AppRole credentials..."
 bash "${REPO_ROOT}/scripts/generate-executor-token.sh"
 dc --profile app up -d
+
+# The one-shot Terraform token created by ROOT_TOKEN is a child in Vault's token
+# tree. Revoking the initial root token recursively revokes that child as well.
+# Terraform has now created a dedicated AppRole, so rotate the persisted token to
+# an AppRole login before revoking root. This keeps post-bootstrap plan/drift
+# checks usable without retaining administrative credentials.
+if ! TF_TOKEN="$(terraform_approle_login)"; then
+  echo "[bootstrap] FATAL: could not rotate Terraform credentials to the Terraform AppRole." >&2
+  echo "[bootstrap] Refusing to revoke the root token because that would leave .data/tf-token unusable." >&2
+  exit 1
+fi
+printf '%s' "${TF_TOKEN}" > "${TF_TOKEN_FILE}"
+chmod 600 "${TF_TOKEN_FILE}"
+echo "[bootstrap]     rotated persisted Terraform token to Terraform AppRole."
 
 echo "[bootstrap] 9/9 revoking the root token (guard: PKI_SENTINEL_KEEP_ROOT=1 to skip)..."
 if [[ "${KEEP_ROOT}" == "1" ]]; then
