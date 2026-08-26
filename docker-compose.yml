@@ -102,12 +102,14 @@ services:
         pid=$$!
         trap 'kill "$$pid" 2>/dev/null || true; wait "$$pid" 2>/dev/null || true' EXIT TERM INT
         for i in $(seq 1 60); do
-          if vault status >/dev/null 2>&1; then break; fi
+          status="$$(vault status 2>&1 || true)"
+          if echo "$$status" | grep -qi 'initialized.*false'; then
+            vault operator init -root-token-id="${VAULT_SEAL_TOKEN}" -recovery-shares=1 -recovery-threshold=1 >/dev/null
+            break
+          fi
+          if echo "$$status" | grep -qi 'initialized.*true'; then break; fi
           sleep 1
         done
-        if vault status 2>&1 | grep -qi 'initialized.*false'; then
-          vault operator init -root-token-id="${VAULT_SEAL_TOKEN}" -recovery-shares=1 -recovery-threshold=1 >/dev/null
-        fi
         wait "$$pid"
     environment:
       VAULT_ADDR: http://127.0.0.1:8200
