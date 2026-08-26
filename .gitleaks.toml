@@ -15,3 +15,15 @@ commits = ["62b3b25b45cbe65abba9b5ad43f6357bae508bdf"]
 paths = ['''^docs/experiments\.md$''']
 regexTarget = "line"
 regexes = ['''duplicate scenarios or profile keys, duplicate/empty reason or dependency''']
+
+# The historical value below is an intentionally invalid token used to assert
+# that Vault audit events reach the Wazuh rule. Scope the exception to the
+# detector, introducing commit, file, and exact test value.
+[[allowlists]]
+description = "Wazuh invalid-token integration-test false positive"
+targetRules = ["curl-auth-header"]
+condition = "AND"
+commits = ["ac9c239a99e4bfa8c7889d34f327e00be8f01779"]
+paths = ['''^scripts/wazuh-live-ingestion-test\.sh$''']
+regexTarget = "line"
+regexes = ['''pki-sentinel-invalid-wazuh-live-test''']

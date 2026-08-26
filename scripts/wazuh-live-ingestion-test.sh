@@ -50,10 +50,10 @@ if (( $(wc -l < "${audit_file}") <= before_lines )); then
   exit 1
 fi
 
-# The single-quoted command must expand inside the Wazuh container, not here.
-# shellcheck disable=SC2016
 first_new_alert_line=$((before_alert_lines + 1))
 for _ in $(seq 1 150); do
+  # The single-quoted command must expand inside the Wazuh container, not here.
+  # shellcheck disable=SC2016
   if "${COMPOSE[@]}" exec -T wazuh-manager /bin/bash -euc '
       test -f /var/ossec/logs/alerts/alerts.json
       tail -n +"$1" /var/ossec/logs/alerts/alerts.json \
