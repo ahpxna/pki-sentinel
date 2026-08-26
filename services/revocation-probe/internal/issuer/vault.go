@@ -198,14 +198,14 @@ func verifyIssuedSerial(vaultSerial string, leafSerial *big.Int) error {
 	}
 	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(vaultSerial), ":", ""), "-", ""))
 	if normalized == "" {
-		return fmt.Errorf("Vault response has an empty serial number")
+		return fmt.Errorf("vault response has an empty serial number")
 	}
 	returned, ok := new(big.Int).SetString(normalized, 16)
 	if !ok || returned.Sign() < 0 {
-		return fmt.Errorf("Vault response serial %q is not hexadecimal", vaultSerial)
+		return fmt.Errorf("vault response serial %q is not hexadecimal", vaultSerial)
 	}
 	if returned.Cmp(leafSerial) != 0 {
-		return fmt.Errorf("Vault response serial %q does not match leaf serial %s", vaultSerial, leafSerial.Text(16))
+		return fmt.Errorf("vault response serial %q does not match leaf serial %s", vaultSerial, leafSerial.Text(16))
 	}
 	return nil
 }
