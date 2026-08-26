@@ -79,6 +79,9 @@ type Target struct {
 	IssuedLeafSHA256  string // hex SHA-256 of the exact issued leaf DER
 	Scenario          Scenario
 	OCSPFreshness     OCSPFreshnessPolicy
+	// ProbeTimeout is assigned by the controller for each attempt and is
+	// enforced unchanged by remote executors.
+	ProbeTimeout time.Duration `json:"probe_timeout_ns"`
 }
 
 // OCSPFreshnessPolicy makes the temporal acceptance rules explicit rather
@@ -152,6 +155,7 @@ type PreflightResult struct {
 	ExpectedDecision Decision        `json:"expected_decision"`
 	ExpectedReasons  []Reason        `json:"expected_reasons,omitempty"`
 	ExpectationMet   bool            `json:"expectation_met"`
+	ProbeStartedAt   time.Time       `json:"probe_started_at"`
 	ObservedAt       time.Time       `json:"observed_at"`
 	AgeAtRevoke      time.Duration   `json:"age_at_revoke_ns,omitempty"`
 	Evidence         CommandEvidence `json:"evidence,omitempty"`

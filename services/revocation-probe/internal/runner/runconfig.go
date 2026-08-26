@@ -24,7 +24,19 @@ type RunConfigSnapshot struct {
 	OCSPFreshness       OCSPFreshnessSnapshot `json:"ocsp_freshness"`
 	Policy              PolicySnapshot        `json:"policy"`
 	EnabledProfiles     []RunProfileSnapshot  `json:"enabled_profiles"`
+	Network             NetworkSnapshot       `json:"network"`
 	Build               BuildIdentity         `json:"build"`
+}
+
+// NetworkSnapshot binds non-secret endpoint and routing inputs that influence
+// which issuer/status path a reproducibility run actually exercised.
+type NetworkSnapshot struct {
+	IssuerEndpoint    string `json:"issuer_endpoint,omitempty"`
+	OCSPEndpoint      string `json:"ocsp_endpoint"`
+	CRLEndpoint       string `json:"crl_endpoint"`
+	PKIDomain         string `json:"pki_domain"`
+	CanaryBindHost    string `json:"canary_bind_host,omitempty"`
+	CanaryConnectHost string `json:"canary_connect_host,omitempty"`
 }
 
 type OCSPFreshnessSnapshot struct {
@@ -99,7 +111,9 @@ func (r *Runner) runConfigSnapshot() RunConfigSnapshot {
 		ProfileConfigDigest: profileConfigDigest,
 		PollIntervalNS:      int64(r.Config.PollInterval), MaxWaitNS: int64(r.Config.MaxWait),
 		MaxAttempts: r.Config.MaxAttempts, PreflightMaxAgeNS: int64(r.Config.PreflightMaxAge),
-		OCSPFreshness: freshness, Policy: policy, EnabledProfiles: enabled, Build: currentBuildIdentity(),
+		OCSPFreshness: freshness, Policy: policy, EnabledProfiles: enabled,
+		Network: NetworkSnapshot{IssuerEndpoint: r.IssuerEndpoint, OCSPEndpoint: r.OCSPURL, CRLEndpoint: r.CRLURL, PKIDomain: r.Domain, CanaryBindHost: r.CanaryBindHost, CanaryConnectHost: r.CanaryConnectHost},
+		Build:   currentBuildIdentity(),
 	}
 }
 

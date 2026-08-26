@@ -137,6 +137,89 @@ func writeNewPrivateFile(path string, contents []byte) error {
 	return nil
 }
 
+// archiveCycleJSON retains signed-report inputs beside the certificate and
+// raw probe artifacts for the same immutable cycle directory.
+func (r *Runner) ArchiveCycleReport(cycleID string, contents []byte) error {
+	return r.archiveCycleFile(cycleID, "report.json", contents)
+}
+
+// ArchiveCycleAttestation retains the signed envelope for its exact cycle.
+func (r *Runner) ArchiveCycleAttestation(cycleID string, contents []byte) error {
+	return r.archiveCycleFile(cycleID, "attestation.json", contents)
+}
+
+func (r *Runner) archiveCycleFile(cycleID, name string, contents []byte) error {
+	if r.EvidenceDir == "" {
+		return fmt.Errorf("evidence directory is required")
+	}
+	directory := filepath.Join(r.EvidenceDir, cycleID)
+	if err := ensurePrivateDir(directory); err != nil {
+		return fmt.Errorf("create cycle evidence directory: %w", err)
+	}
+	if err := writeAtomicPrivateFile(filepath.Join(directory, safeArtifactName(name)), contents, false); err != nil {
+		return err
+	}
+	return nil
+}
+
+// UpdateLatestCycleReport and UpdateLatestCycleAttestation maintain atomic
+// convenience copies. Historical verification must use the per-cycle files.
+func (r *Runner) UpdateLatestCycleReport(contents []byte) error {
+	return r.updateLatestCycleFile("last-cycle.json", contents)
+}
+
+func (r *Runner) UpdateLatestCycleAttestation(contents []byte) error {
+	return r.updateLatestCycleFile("last-cycle.attestation.json", contents)
+}
+
+func (r *Runner) updateLatestCycleFile(name string, contents []byte) error {
+	if r.EvidenceDir == "" {
+		return fmt.Errorf("evidence directory is required")
+	}
+	if err := ensurePrivateDir(r.EvidenceDir); err != nil {
+		return fmt.Errorf("create evidence directory: %w", err)
+	}
+	return writeAtomicPrivateFile(filepath.Join(r.EvidenceDir, safeArtifactName(name)), contents, true)
+}
+
+// writeAtomicPrivateFile durably publishes an evidence file after its content
+// is synced. Immutable cycle files reject replacement; latest-cycle copies are
+// explicitly replaceable convenience pointers.
+func writeAtomicPrivateFile(path string, contents []byte, replace bool) error {
+	if !replace {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("evidence file already exists: %s", path)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".evidence-*")
+	if err != nil {
+		return err
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(contents); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryName, path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
 type cycleArtifact struct {
 	MediaType string
 	Contents  []byte

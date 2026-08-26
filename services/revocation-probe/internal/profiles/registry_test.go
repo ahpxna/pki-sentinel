@@ -106,6 +106,24 @@ func TestCheckOCSPFreshness(t *testing.T) {
 	}
 }
 
+func TestCheckRevocationTimeRejectsFutureAndImpossibleValues(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	notBefore := now.Add(-time.Hour)
+	policy := OCSPFreshnessPolicy{MaxClockSkew: 5 * time.Minute}
+	if got := checkRevocationTime(now.Add(-time.Minute), notBefore, now, policy); got != "" {
+		t.Fatalf("valid revocation time classified %s", got)
+	}
+	if got := checkRevocationTime(now.Add(6*time.Minute), notBefore, now, policy); got != ReasonFutureStatus {
+		t.Fatalf("future revocation time classified %s", got)
+	}
+	if got := checkRevocationTime(time.Time{}, notBefore, now, policy); got != ReasonInvalidStatus {
+		t.Fatalf("missing revocation time classified %s", got)
+	}
+	if got := checkRevocationTime(notBefore.Add(-6*time.Minute), notBefore, now, policy); got != ReasonInvalidStatus {
+		t.Fatalf("pre-certificate revocation time classified %s", got)
+	}
+}
+
 func TestVerifyPresentedLeafBindsExactIssuedCertificate(t *testing.T) {
 	leaf := &x509.Certificate{Raw: []byte("issued-leaf-der")}
 	sum := sha256.Sum256(leaf.Raw)

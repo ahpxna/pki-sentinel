@@ -22,7 +22,6 @@ import (
 const maxRequestBytes = 1 << 20
 
 var executorHTTPClient = &http.Client{
-	Timeout: 15 * time.Second,
 	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
@@ -184,7 +183,11 @@ func Serve(ctx context.Context, address, profileName string) error {
 			http.Error(w, "disallowed probe target", http.StatusForbidden)
 			return
 		}
-		probeCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		if target.ProbeTimeout <= 0 {
+			http.Error(w, "probe_timeout_ns must be positive", http.StatusBadRequest)
+			return
+		}
+		probeCtx, cancel := context.WithTimeout(r.Context(), target.ProbeTimeout)
 		defer cancel()
 		observation, err := selected.Probe(probeCtx, target)
 		if err != nil {
@@ -197,7 +200,7 @@ func Serve(ctx context.Context, address, profileName string) error {
 		_ = json.NewEncoder(w).Encode(observation)
 	})
 
-	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second}
+	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)

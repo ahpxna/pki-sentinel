@@ -1,15 +1,22 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
 func TestParseURLs(t *testing.T) {
 	t.Parallel()
@@ -91,5 +98,26 @@ func TestRemotePreservesExecutorHarnessError(t *testing.T) {
 	}
 	if observation.Decision != profiles.DecisionHarnessError || observation.Reason != profiles.ReasonHarnessFailure {
 		t.Fatalf("unexpected observation: %#v", observation)
+	}
+}
+
+func TestRemoteCarriesControllerConfiguredTimeout(t *testing.T) {
+	t.Setenv("PROBE_EXECUTOR_TOKEN", "test-token")
+	originalTransport := executorHTTPClient.Transport
+	defer func() { executorHTTPClient.Transport = originalTransport }()
+	wantTimeout := 27 * time.Second
+	executorHTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var target profiles.Target
+		if err := json.NewDecoder(request.Body).Decode(&target); err != nil {
+			t.Fatal(err)
+		}
+		if target.ProbeTimeout != wantTimeout {
+			t.Fatalf("probe timeout=%s, want %s", target.ProbeTimeout, wantTimeout)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(`{"decision":"ACCEPT","reason":"STATUS_GOOD"}`))}, nil
+	})
+	profile := Remote(profiles.Profile{Name: "curl-default"}, "http://executor.invalid")
+	if _, err := profile.Probe(context.Background(), profiles.Target{ProbeTimeout: wantTimeout}); err != nil {
+		t.Fatalf("remote probe: %v", err)
 	}
 }

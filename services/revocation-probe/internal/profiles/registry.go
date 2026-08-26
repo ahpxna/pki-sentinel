@@ -296,6 +296,12 @@ func opensslOCSPDirect() Profile {
 				metrics.OCSPResponderUp.Set(1)
 				return withEvidence(observe(DecisionReject, reason)), nil
 			}
+			if resp.Status == ocsp.Revoked {
+				if reason := checkRevocationTime(resp.RevokedAt, leaf.NotBefore, time.Now(), target.OCSPFreshness); reason != "" {
+					metrics.OCSPResponderUp.Set(1)
+					return withEvidence(observe(DecisionReject, reason)), nil
+				}
+			}
 			metrics.OCSPResponderUp.Set(1)
 			switch resp.Status {
 			case ocsp.Revoked:
@@ -466,6 +472,9 @@ func goTLSOCSP() Profile {
 				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, reason), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
 			if resp.Status == ocsp.Revoked {
+				if reason := checkRevocationTime(resp.RevokedAt, leaf.NotBefore, time.Now(), target.OCSPFreshness); reason != "" {
+					return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, reason), "stapled-ocsp.der", "application/ocsp-response", staple), nil
+				}
 				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonRevoked), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
 			if resp.Status == ocsp.Unknown {
@@ -574,6 +583,9 @@ func crlCheck() Profile {
 			metrics.CRLEntries.Set(float64(len(crl.RevokedCertificateEntries)))
 			for _, entry := range crl.RevokedCertificateEntries {
 				if entry.SerialNumber.Cmp(leaf.SerialNumber) == 0 {
+					if reason := checkRevocationTime(entry.RevocationTime, leaf.NotBefore, now, target.OCSPFreshness); reason != "" {
+						return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, reason)), nil
+					}
 					return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonRevoked)), nil
 				}
 			}
@@ -603,6 +615,19 @@ func checkOCSPFreshness(response *ocsp.Response, now time.Time, configured OCSPF
 	}
 	if now.After(response.NextUpdate) {
 		return ReasonStaleStatus
+	}
+	return ""
+}
+
+// checkRevocationTime ensures a revoked status is not asserted before the
+// asserted revocation time and that it is plausible for the leaf certificate.
+func checkRevocationTime(revokedAt, notBefore, now time.Time, configured OCSPFreshnessPolicy) Reason {
+	policy := configured.WithDefaults()
+	if revokedAt.IsZero() || revokedAt.Before(notBefore.Add(-policy.MaxClockSkew)) {
+		return ReasonInvalidStatus
+	}
+	if revokedAt.After(now.Add(policy.MaxClockSkew)) {
+		return ReasonFutureStatus
 	}
 	return ""
 }

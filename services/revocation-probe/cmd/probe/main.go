@@ -169,6 +169,7 @@ func cmdRun(args []string) {
 		// Delta CRLs require base+delta merge semantics. The oracle consumes
 		// the complete issuer-signed CRL as its standalone source of truth.
 		CRLURL:            vaultPublicAddr + "/v1/pki_int/crl",
+		IssuerEndpoint:    vaultAddr,
 		Domain:            domain,
 		CanaryBindHost:    env("PROBE_CANARY_BIND_HOST", ""),
 		CanaryConnectHost: env("PROBE_CANARY_CONNECT_HOST", ""),
@@ -183,9 +184,25 @@ func cmdRun(args []string) {
 			if marshalErr != nil {
 				return marshalErr
 			}
+			if archiveErr := r.ArchiveCycleReport(report.CycleID, canonicalJSON); archiveErr != nil {
+				return fmt.Errorf("archive cycle report: %w", archiveErr)
+			}
+			if latestErr := r.UpdateLatestCycleReport(canonicalJSON); latestErr != nil {
+				return fmt.Errorf("update latest cycle report: %w", latestErr)
+			}
 			if len(attestationPrivateKey) > 0 {
-				if signErr := writeAttestation(*attestationOut, attestationPrivateKey, canonicalJSON); signErr != nil {
+				attestationJSON, signErr := marshalAttestation(attestationPrivateKey, canonicalJSON)
+				if signErr != nil {
 					return fmt.Errorf("write assurance attestation: %w", signErr)
+				}
+				if archiveErr := r.ArchiveCycleAttestation(report.CycleID, attestationJSON); archiveErr != nil {
+					return fmt.Errorf("archive cycle attestation: %w", archiveErr)
+				}
+				if latestErr := r.UpdateLatestCycleAttestation(attestationJSON); latestErr != nil {
+					return fmt.Errorf("update latest cycle attestation: %w", latestErr)
+				}
+				if writeErr := writeAttestation(*attestationOut, attestationJSON); writeErr != nil {
+					return fmt.Errorf("write assurance attestation: %w", writeErr)
 				}
 			}
 			if printErr := writeReport(os.Stdout, report, *output, canonicalJSON, !*once); printErr != nil {
@@ -219,15 +236,19 @@ func cmdRun(args []string) {
 	}
 }
 
-func writeAttestation(path string, privateKey, canonicalJSON []byte) error {
+func marshalAttestation(privateKey, canonicalJSON []byte) ([]byte, error) {
 	envelope, err := attestation.SignJSON(privateKey, canonicalJSON, time.Now())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	contents, err := attestation.MarshalEnvelope(envelope)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	return contents, nil
+}
+
+func writeAttestation(path string, contents []byte) error {
 	temporary, err := os.CreateTemp(filepath.Dir(path), ".assurance-attestation-*")
 	if err != nil {
 		return fmt.Errorf("create temporary attestation: %w", err)
@@ -238,15 +259,27 @@ func writeAttestation(path string, privateKey, canonicalJSON []byte) error {
 		temporary.Close()
 		return fmt.Errorf("set temporary attestation permissions: %w", err)
 	}
-	if _, err := temporary.Write(append(contents, '\n')); err != nil {
+	if _, err := temporary.Write(contents); err != nil {
 		temporary.Close()
 		return fmt.Errorf("write temporary attestation: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return fmt.Errorf("sync temporary attestation: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close temporary attestation: %w", err)
 	}
 	if err := os.Rename(temporaryName, path); err != nil {
 		return fmt.Errorf("replace attestation: %w", err)
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("open attestation directory: %w", err)
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil {
+		return fmt.Errorf("sync attestation directory: %w", err)
 	}
 	return nil
 }

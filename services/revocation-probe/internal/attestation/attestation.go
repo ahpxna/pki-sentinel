@@ -168,9 +168,10 @@ func Verify(publicKeyPEM []byte, envelope Envelope) error {
 
 func payloadIdentity(payload json.RawMessage) (string, string, string, error) {
 	var identity struct {
-		CycleID         string `json:"cycle_id"`
-		ScenarioDigest  string `json:"scenario_digest"`
-		RunConfigDigest string `json:"run_config_digest"`
+		CycleID         string          `json:"cycle_id"`
+		ScenarioDigest  string          `json:"scenario_digest"`
+		RunConfig       json.RawMessage `json:"run_config"`
+		RunConfigDigest string          `json:"run_config_digest"`
 	}
 	if err := json.Unmarshal(payload, &identity); err != nil {
 		return "", "", "", fmt.Errorf("decode attestation payload identity: %w", err)
@@ -184,7 +185,35 @@ func payloadIdentity(payload json.RawMessage) (string, string, string, error) {
 	if !validDigest(identity.RunConfigDigest) {
 		return "", "", "", fmt.Errorf("attestation payload run_config_digest %q is not a canonical SHA-256 digest", identity.RunConfigDigest)
 	}
+	canonicalConfig, err := canonicalJSON(identity.RunConfig)
+	if err != nil {
+		return "", "", "", fmt.Errorf("attestation payload run_config: %w", err)
+	}
+	if len(canonicalConfig) == 0 || canonicalConfig[0] != '{' {
+		return "", "", "", fmt.Errorf("attestation payload run_config must be a JSON object")
+	}
+	configHash := sha256.Sum256(canonicalConfig)
+	if got := "sha256:" + hex.EncodeToString(configHash[:]); got != identity.RunConfigDigest {
+		return "", "", "", fmt.Errorf("attestation payload run_config_digest does not match canonical run_config")
+	}
 	return identity.CycleID, identity.ScenarioDigest, identity.RunConfigDigest, nil
+}
+
+// canonicalJSON removes insignificant whitespace from the embedded run config.
+// Runner hashes the same compact encoding emitted by encoding/json, and the
+// report carries a struct rather than an unstructured map.
+func canonicalJSON(raw json.RawMessage) ([]byte, error) {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return nil, fmt.Errorf("must be valid JSON")
+	}
+	if err := rejectDuplicateJSONKeys(raw); err != nil {
+		return nil, err
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return nil, err
+	}
+	return compact.Bytes(), nil
 }
 
 func validDigest(value string) bool {

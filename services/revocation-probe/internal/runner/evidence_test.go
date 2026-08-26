@@ -164,3 +164,24 @@ func TestPersistCycleArtifactsIsDeterministicAndNonOverwriting(t *testing.T) {
 		t.Fatal("persistCycleArtifacts overwrote an existing artifact")
 	}
 }
+
+func TestArchiveCycleReportIsImmutableAndLatestCopyIsReplaceable(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{EvidenceDir: dir}
+	if err := r.ArchiveCycleReport("cycle-1", []byte(`{"cycle_id":"cycle-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ArchiveCycleReport("cycle-1", []byte(`{"replacement":true}`)); err == nil {
+		t.Fatal("cycle report archive overwrote immutable evidence")
+	}
+	if err := r.UpdateLatestCycleReport([]byte(`{"cycle_id":"cycle-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.UpdateLatestCycleReport([]byte(`{"cycle_id":"cycle-2"}`)); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(dir, "last-cycle.json"))
+	if err != nil || string(contents) != `{"cycle_id":"cycle-2"}` {
+		t.Fatalf("latest cycle report=%q err=%v", contents, err)
+	}
+}

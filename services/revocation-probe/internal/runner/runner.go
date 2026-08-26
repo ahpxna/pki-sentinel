@@ -7,6 +7,7 @@ package runner
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -29,7 +30,7 @@ import (
 
 // Runner ties together the issuer, canary server, and profile registry.
 type Runner struct {
-	Issuer    *issuer.Client
+	Issuer    CanaryIssuer
 	Config    *config.Config
 	Profiles  []profiles.Profile
 	Scenarios *scenarios.Registry
@@ -38,6 +39,9 @@ type Runner struct {
 	OCSPURL string
 	CRLURL  string
 	Domain  string // e.g. "internal" — canary hostnames are <uuid>.canary.<Domain>
+	// IssuerEndpoint is a non-secret Vault address retained in the signed run
+	// configuration; credentials are never included in evidence.
+	IssuerEndpoint string
 	// CanaryBindHost and CanaryConnectHost are set only when profiles execute
 	// in separate containers. The zero values preserve loopback-only local
 	// canaries and direct in-process profile execution.
@@ -49,6 +53,15 @@ type Runner struct {
 	// ExecutorURLs records the configured profile-to-executor mapping so the
 	// signed run configuration can reproduce where each implementation ran.
 	ExecutorURLs map[string]string
+}
+
+// CanaryIssuer covers the issuer operations performed by a single cycle.
+// It permits cleanup behavior to be verified without a live Vault instance.
+type CanaryIssuer interface {
+	IssueCanary(context.Context, string) (*issuer.CanaryCert, error)
+	RevokeAt(context.Context, string, time.Time) (time.Time, time.Time, error)
+	Revoke(context.Context, string) (time.Time, time.Time, error)
+	FetchOCSPResponse(context.Context, string, *x509.Certificate, *x509.Certificate) ([]byte, int, error)
 }
 
 // CycleReport is the structured JSON summary of one cycle (used by
@@ -63,11 +76,21 @@ type CycleReport struct {
 	Valid            bool                       `json:"valid"`
 	Phase            CyclePhase                 `json:"phase"`
 	RevokeAckAt      time.Time                  `json:"revoke_ack_at"`
+	Cleanup          CleanupStatus              `json:"cleanup"`
 	Timeline         Timeline                   `json:"timeline"`
 	Artifacts        []profiles.Artifact        `json:"artifacts,omitempty"`
 	Preflight        []profiles.PreflightResult `json:"preflight,omitempty"`
 	Results          []profiles.Result          `json:"results"`
 	Error            string                     `json:"error,omitempty"`
+}
+
+// CleanupStatus records a compensating revocation performed after a cycle
+// fails after certificate issuance but before the experiment revoke succeeds.
+// It is distinct from RevokeAckAt, which belongs only to the measurement.
+type CleanupStatus struct {
+	Attempted bool   `json:"attempted"`
+	Revoked   bool   `json:"revoked"`
+	Error     string `json:"error,omitempty"`
 }
 
 // CyclePhase records the last experiment boundary reached by a cycle. Failed
@@ -131,6 +154,9 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	if len(r.Config.EnabledNames()) == 0 {
 		return nil, fmt.Errorf("runner: at least one profile must be enabled")
 	}
+	if err := r.validateEnabledRoles(); err != nil {
+		return nil, err
+	}
 	scenario := r.Scenario
 	if scenario == "" {
 		return nil, fmt.Errorf("runner: scenario is required")
@@ -171,6 +197,22 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 		return fail(PhaseIssue, fmt.Errorf("runner: issuing canary: %w", err))
 	}
 	metrics.CertNotAfter.Set(float64(cert.Cert.NotAfter.Unix()))
+	cleanupArmed := true
+	defer func() {
+		if !cleanupArmed {
+			return
+		}
+		report.Cleanup.Attempted = true
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if _, _, cleanupErr := r.Issuer.Revoke(cleanupCtx, cert.SerialNumber); cleanupErr != nil {
+			report.Cleanup.Error = cleanupErr.Error()
+			log.Printf("[cycle %s] compensating revoke for serial=%s failed: %v", cycleID, cert.SerialNumber, cleanupErr)
+			return
+		}
+		report.Cleanup.Revoked = true
+		log.Printf("[cycle %s] compensating revoke completed for serial=%s", cycleID, cert.SerialNumber)
+	}()
 
 	report.Phase = PhasePersistEvidence
 	report.Artifacts, err = r.persistCycleArtifacts(cycleID, map[string]cycleArtifact{
@@ -277,6 +319,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
 		return fail(PhaseRevoke, fmt.Errorf("runner: revoking canary: %w", err))
 	}
+	cleanupArmed = false
 	revokeAckAt := tResp
 	report.RevokeAckAt = revokeAckAt.UTC()
 	for i := range report.Preflight {
@@ -320,11 +363,13 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 
 	var stapleErr error
 	var stapleSourceRevokedAt time.Time
+	var publishedStaple []byte
 	if stapling == canary.StaplingOn {
 		go func() {
-			sourceRevokedAt, publishedAt, err := r.refreshRevokedStaple(ctx, srv, cert)
+			staple, sourceRevokedAt, publishedAt, err := r.refreshRevokedStaple(ctx, srv, cert)
 			stapleErr = err
 			stapleSourceRevokedAt = sourceRevokedAt
+			publishedStaple = staple
 			if err != nil {
 				stapleBarrier.fail(err)
 				return
@@ -377,6 +422,17 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
 		return fail(PhasePersistEvidence, fmt.Errorf("runner: persisting post-revocation evidence: %w", err))
 	}
+	if len(publishedStaple) > 0 {
+		references, err := r.persistCycleArtifacts(cycleID, map[string]cycleArtifact{
+			"published-staple.der": {MediaType: "application/ocsp-response", Contents: publishedStaple},
+		})
+		if err != nil {
+			metrics.CycleTotal.WithLabelValues("error").Inc()
+			return fail(PhasePersistEvidence, fmt.Errorf("runner: persisting published OCSP staple: %w", err))
+		}
+		report.Artifacts = append(report.Artifacts, references...)
+		sort.Slice(report.Artifacts, func(i, j int) bool { return report.Artifacts[i].Path < report.Artifacts[j].Path })
+	}
 	if stapleErr != nil {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
 		return fail(PhaseObserve, fmt.Errorf("runner: publishing revoked OCSP staple: %w", stapleErr))
@@ -423,6 +479,26 @@ func sortResults(results []profiles.Result) {
 		}
 		return results[i].Method < results[j].Method
 	})
+}
+
+func (r *Runner) validateEnabledRoles() error {
+	oracles := 0
+	clients := 0
+	for _, profile := range r.Profiles {
+		if !r.Config.IsEnabled(profile.Name) {
+			continue
+		}
+		switch profile.Role {
+		case profiles.RoleStatusOracle:
+			oracles++
+		case profiles.RoleClientExecutor:
+			clients++
+		}
+	}
+	if oracles == 0 || clients == 0 {
+		return fmt.Errorf("runner: enabled profiles must include at least one status oracle and one client executor (oracles=%d clients=%d)", oracles, clients)
+	}
+	return nil
 }
 
 func newTimeline(revokeRequestAt, revokeAckAt time.Time) Timeline {
@@ -490,7 +566,7 @@ func (t *Timeline) derive() {
 	}
 }
 
-func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, cert *issuer.CanaryCert) (time.Time, time.Time, error) {
+func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, cert *issuer.CanaryCert) ([]byte, time.Time, time.Time, error) {
 	deadline := time.Now().Add(r.Config.MaxWait)
 	var lastErr error
 	var lastStatus int
@@ -498,9 +574,9 @@ func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, c
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			if lastErr != nil {
-				return time.Time{}, time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: %w", lastErr)
+				return nil, time.Time{}, time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: %w", lastErr)
 			}
-			return time.Time{}, time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: last status=%d", lastStatus)
+			return nil, time.Time{}, time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: last status=%d", lastStatus)
 		}
 		attemptTimeout := 5 * time.Second
 		if remaining < attemptTimeout {
@@ -514,7 +590,7 @@ func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, c
 			sourceRevokedAt := time.Now()
 			srv.SetOCSPStaple(staple)
 			publishedAt := time.Now()
-			return sourceRevokedAt, publishedAt, nil
+			return staple, sourceRevokedAt, publishedAt, nil
 		}
 
 		sleepFor := r.Config.PollInterval
@@ -533,7 +609,7 @@ func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, c
 				default:
 				}
 			}
-			return time.Time{}, time.Time{}, ctx.Err()
+			return nil, time.Time{}, time.Time{}, ctx.Err()
 		case <-timer.C:
 		}
 	}
@@ -573,8 +649,11 @@ func (r *Runner) preflight(ctx context.Context, target profiles.Target) ([]profi
 		wg.Add(1)
 		go func(p profiles.Profile, expectation profiles.Expectation) {
 			defer wg.Done()
-			pctx, cancel := context.WithTimeout(ctx, r.Config.TimeoutFor(p.Name))
-			observation, err := p.Probe(pctx, target)
+			probeStartedMono := time.Now()
+			attemptTarget := target
+			attemptTarget.ProbeTimeout = r.Config.TimeoutFor(p.Name)
+			pctx, cancel := context.WithTimeout(ctx, attemptTarget.ProbeTimeout)
+			observation, err := p.Probe(pctx, attemptTarget)
 			cancel()
 			observedMono := time.Now()
 			if err != nil {
@@ -585,12 +664,12 @@ func (r *Runner) preflight(ctx context.Context, target profiles.Target) ([]profi
 				Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario,
 				Decision: observation.Decision, Reason: observation.Reason,
 				ExpectedDecision: expectation.Before, ExpectedReasons: expectation.BeforeReasons,
-				ExpectationMet: expectation.MatchesBefore(observation), ObservedAt: observedMono.UTC(), Evidence: observation.Evidence,
+				ExpectationMet: expectation.MatchesBefore(observation), ProbeStartedAt: probeStartedMono.UTC(), ObservedAt: observedMono.UTC(), Evidence: observation.Evidence,
 			}
 			if err != nil {
 				result.Err = err.Error()
 			}
-			outcomes <- outcome{result: result, observedMono: observedMono, probeErr: err}
+			outcomes <- outcome{result: result, observedMono: probeStartedMono, probeErr: err}
 		}(p, expectation)
 	}
 	wg.Wait()
@@ -622,10 +701,10 @@ func validatePreflightAge(observed map[string]time.Time, now time.Time, maxAge t
 	}
 	for profile, at := range observed {
 		if at.IsZero() {
-			return fmt.Errorf("preflight: profile %s has no observation timestamp", profile)
+			return fmt.Errorf("preflight: profile %s has no probe-start timestamp", profile)
 		}
 		if age := now.Sub(at); age > maxAge {
-			return fmt.Errorf("preflight: profile %s observation is %s old, exceeds %s", profile, age, maxAge)
+			return fmt.Errorf("preflight: profile %s probe started %s ago, exceeds %s", profile, age, maxAge)
 		}
 	}
 	return nil
@@ -848,7 +927,9 @@ func (r *Runner) pollOne(ctx context.Context, p profiles.Profile, target profile
 			attemptTimeout = remaining
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
-		observation, err := p.Probe(probeCtx, target)
+		attemptTarget := target
+		attemptTarget.ProbeTimeout = attemptTimeout
+		observation, err := p.Probe(probeCtx, attemptTarget)
 		cancel()
 		if err != nil {
 			observation.Decision = profiles.DecisionHarnessError

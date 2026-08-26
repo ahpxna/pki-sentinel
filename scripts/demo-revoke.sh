@@ -10,8 +10,10 @@ ATTESTATION_PATH="${ATTESTATION_DIR}/last-cycle.attestation.json"
 mkdir -p "$(dirname "${REPORT_PATH}")"
 
 ARGS=(run --once --output json)
+SIGNED_RUN=false
 if [[ -f "${ATTESTATION_DIR}/assurance.key" && -f "${ATTESTATION_DIR}/assurance.pub" ]]; then
   ARGS+=(--attestation-key /run/attestation/assurance.key --attestation-out /run/attestation/last-cycle.attestation.json)
+  SIGNED_RUN=true
 fi
 
 (cd "${REPO_ROOT}" && docker compose exec -T revocation-probe probe "${ARGS[@]}" > "${REPORT_PATH}")
@@ -25,7 +27,7 @@ jq -r '
 ' "${REPORT_PATH}" | column -t -s $'\t'
 
 echo "[demo-revoke] machine-readable report: .data/last-cycle.json"
-if [[ -f "${ATTESTATION_PATH}" ]]; then
+if [[ "${SIGNED_RUN}" == "true" ]]; then
   (cd "${REPO_ROOT}" && docker compose exec -T revocation-probe \
     probe attest verify --public-key /run/attestation/assurance.pub --input /run/attestation/last-cycle.attestation.json)
   echo "[demo-revoke] signed attestation: .data/attestation/last-cycle.attestation.json"

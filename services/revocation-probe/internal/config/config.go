@@ -83,10 +83,13 @@ func Load(path string) (*Config, error) {
 	if c.PollInterval < 0 || c.MaxWait < 0 || c.MaxAttempts < 0 || c.PreflightMaxAge <= 0 {
 		return nil, fmt.Errorf("config: poll_interval, max_wait, max_attempts, and preflight_max_age must be positive")
 	}
-	if c.OCSPFreshness.MaxClockSkew <= 0 {
+	if c.OCSPFreshness.MaxClockSkew < 0 || c.OCSPFreshness.MaxAgeWithoutNextUpdate < 0 {
+		return nil, fmt.Errorf("config: ocsp_freshness durations must not be negative")
+	}
+	if c.OCSPFreshness.MaxClockSkew == 0 {
 		c.OCSPFreshness.MaxClockSkew = 5 * time.Minute
 	}
-	if c.OCSPFreshness.MaxAgeWithoutNextUpdate <= 0 {
+	if c.OCSPFreshness.MaxAgeWithoutNextUpdate == 0 {
 		c.OCSPFreshness.MaxAgeWithoutNextUpdate = time.Hour
 	}
 	seenProfiles := make(map[string]struct{}, len(c.Profiles))

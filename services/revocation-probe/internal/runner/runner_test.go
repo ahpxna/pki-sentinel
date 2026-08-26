@@ -83,6 +83,30 @@ func TestRunOnceRejectsInvalidManifestStaplingBeforeIssuing(t *testing.T) {
 	}
 }
 
+func TestRunOnceRequiresEnabledOracleAndClientBeforeIssuing(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		profiles []profiles.Profile
+	}{
+		{name: "client only", profiles: []profiles.Profile{{Name: "client", Role: profiles.RoleClientExecutor}}},
+		{name: "oracle only", profiles: []profiles.Profile{{Name: "oracle", Role: profiles.RoleStatusOracle}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			name := test.profiles[0].Name
+			r := &Runner{
+				Config:    &config.Config{Profiles: []config.ProfileConfig{{Name: name, Enabled: true, Timeout: time.Second}}},
+				Profiles:  test.profiles,
+				Scenario:  "test",
+				Scenarios: testScenarios(name),
+			}
+			report, err := r.RunOnce(context.Background())
+			if err == nil || report != nil {
+				t.Fatalf("RunOnce report=%v err=%v, want role validation before issuer use", report, err)
+			}
+		})
+	}
+}
+
 func TestPreflightRetainsBeforeObservationEvidence(t *testing.T) {
 	r := &Runner{Config: &config.Config{Profiles: []config.ProfileConfig{{Name: "client", Enabled: true, Timeout: time.Second}}}, Scenarios: testScenarios("client")}
 	r.Profiles = []profiles.Profile{{
@@ -165,6 +189,16 @@ func TestPollClientsWaitsForManifestEvidenceDependencies(t *testing.T) {
 	staple.satisfy(time.Now())
 	if results := <-done; len(results) != 2 {
 		t.Fatalf("results=%d, want 2", len(results))
+	}
+}
+
+func TestValidatePreflightAgeUsesProbeStartBoundary(t *testing.T) {
+	now := time.Now()
+	if err := validatePreflightAge(map[string]time.Time{"remote-client": now.Add(-3 * time.Second)}, now, 2*time.Second); err == nil {
+		t.Fatal("preflight accepted a probe whose start predates the freshness bound")
+	}
+	if err := validatePreflightAge(map[string]time.Time{"remote-client": now.Add(-time.Second)}, now, 2*time.Second); err != nil {
+		t.Fatalf("fresh probe start rejected: %v", err)
 	}
 }
 
