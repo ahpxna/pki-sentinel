@@ -42,6 +42,7 @@ type cycleReport struct {
 	CycleID        string   `json:"cycle_id"`
 	Scenario       string   `json:"scenario"`
 	ScenarioDigest string   `json:"scenario_digest"`
+	ConfigDigest   string   `json:"config_digest"`
 	Valid          bool     `json:"valid"`
 	Phase          string   `json:"phase"`
 	Preflight      []result `json:"preflight"`
@@ -51,6 +52,7 @@ type cycleReport struct {
 type attestationEnvelope struct {
 	Statement struct {
 		ScenarioDigest string `json:"scenario_digest"`
+		ConfigDigest   string `json:"config_digest"`
 	} `json:"statement"`
 	Payload json.RawMessage `json:"payload"`
 }
@@ -117,8 +119,11 @@ func TestRevocationEnforcement(t *testing.T) {
 	if report.Scenario != "revoked_staple" {
 		t.Fatalf("probe scenario=%q, want revoked_staple", report.Scenario)
 	}
-	if !validScenarioDigest(report.ScenarioDigest) {
+	if !validDigest(report.ScenarioDigest) {
 		t.Fatalf("probe report has invalid scenario_digest %q", report.ScenarioDigest)
+	}
+	if !validDigest(report.ConfigDigest) {
+		t.Fatalf("probe report has invalid config_digest %q", report.ConfigDigest)
 	}
 	if !report.Valid || report.Phase != "complete" {
 		t.Fatalf("probe cycle validity=%v phase=%q, want valid complete cycle", report.Valid, report.Phase)
@@ -161,10 +166,10 @@ func TestRevocationEnforcement(t *testing.T) {
 	}
 }
 
-// TestAttestationBindsScenarioDigest verifies the integration cycle's actual
+// TestAttestationBindsAssuranceDigests verifies the integration cycle's actual
 // envelope, not a synthetic payload. CI provisions these paths alongside the
 // cycle report; local report-only runs skip this explicit signature check.
-func TestAttestationBindsScenarioDigest(t *testing.T) {
+func TestAttestationBindsAssuranceDigests(t *testing.T) {
 	attestationPath := os.Getenv("PROBE_ATTESTATION")
 	publicKeyPath := os.Getenv("PROBE_ATTESTATION_PUBLIC_KEY")
 	if attestationPath == "" || publicKeyPath == "" {
@@ -189,14 +194,17 @@ func TestAttestationBindsScenarioDigest(t *testing.T) {
 		}
 	}
 	if envelope.Statement.ScenarioDigest != report.ScenarioDigest {
-		t.Fatalf("attestation digest=%q, report digest=%q", envelope.Statement.ScenarioDigest, report.ScenarioDigest)
+		t.Fatalf("attestation scenario digest=%q, report digest=%q", envelope.Statement.ScenarioDigest, report.ScenarioDigest)
+	}
+	if envelope.Statement.ConfigDigest != report.ConfigDigest {
+		t.Fatalf("attestation config digest=%q, report digest=%q", envelope.Statement.ConfigDigest, report.ConfigDigest)
 	}
 	var payload cycleReport
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		t.Fatalf("parsing attestation payload: %v", err)
 	}
-	if payload.Scenario != report.Scenario || payload.ScenarioDigest != report.ScenarioDigest {
-		t.Fatalf("attestation payload does not match report scenario identity: %#v", payload)
+	if payload.Scenario != report.Scenario || payload.ScenarioDigest != report.ScenarioDigest || payload.ConfigDigest != report.ConfigDigest {
+		t.Fatalf("attestation payload does not match report assurance identity: %#v", payload)
 	}
 	binPath := os.Getenv("PROBE_BIN")
 	if binPath == "" {
@@ -208,7 +216,7 @@ func TestAttestationBindsScenarioDigest(t *testing.T) {
 	}
 }
 
-func validScenarioDigest(value string) bool {
+func validDigest(value string) bool {
 	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
 		return false
 	}

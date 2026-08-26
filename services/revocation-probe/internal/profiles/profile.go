@@ -130,9 +130,10 @@ type CommandEvidence struct {
 
 // Observation is returned by one oracle or client execution attempt.
 type Observation struct {
-	Decision Decision        `json:"decision"`
-	Reason   Reason          `json:"reason"`
-	Evidence CommandEvidence `json:"evidence,omitempty"`
+	Decision     Decision        `json:"decision"`
+	Reason       Reason          `json:"reason"`
+	Evidence     CommandEvidence `json:"evidence,omitempty"`
+	HarnessError string          `json:"harness_error,omitempty"`
 }
 
 // PreflightResult is the durable BEFORE-contract observation for one profile.

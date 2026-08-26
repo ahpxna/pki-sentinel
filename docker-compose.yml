@@ -23,9 +23,9 @@ x-profile-executor: &profile-executor
     start_period: 5s
 
 services:
-  # The probe runs as an explicit non-root UID. Docker creates absent bind
-  # mount directories as root, so establish durable evidence ownership before
-  # a controller or chaos process attempts to write an artifact.
+  # The probe runs as an explicit non-root runtime UID/GID aligned by `make env`
+  # with the invoking host user. Docker can create absent bind-mount directories
+  # as root, so normalize durable evidence ownership before writers start.
   evidence-init:
     image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/revocation-probe:local
     build:
@@ -35,9 +35,26 @@ services:
     user: "0:0"
     network_mode: none
     entrypoint: ["/bin/sh", "-ec"]
-    command: ["mkdir -p /evidence && chown -R 10001:10001 /evidence && chmod 0750 /evidence"]
+    environment:
+      PROBE_RUNTIME_UID: ${PROBE_RUNTIME_UID:-10001}
+      PROBE_RUNTIME_GID: ${PROBE_RUNTIME_GID:-10001}
+    command: ["mkdir -p /evidence && chown -R $${PROBE_RUNTIME_UID}:$${PROBE_RUNTIME_GID} /evidence && chmod 0700 /evidence"]
     volumes:
       - ./.data/evidence:/evidence
+    restart: "no"
+
+  # Root-only teardown helper for bind-mounted state created by services that
+  # intentionally run under different container UIDs (Vault, probe, etc.). It
+  # is never started by normal profiles; `make clean` invokes it explicitly.
+  state-cleaner:
+    image: ${VAULT_IMAGE}
+    profiles: ["tools"]
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["rm -rf /data/* /data/.[!.]* /data/..?*"]
+    volumes:
+      - ./.data:/data
     restart: "no"
 
   attestation-init:
@@ -49,7 +66,10 @@ services:
     user: "0:0"
     network_mode: none
     entrypoint: ["/bin/sh", "-ec"]
-    command: ["mkdir -p /attestation && chown -R 10001:10001 /attestation && chmod 0700 /attestation"]
+    environment:
+      PROBE_RUNTIME_UID: ${PROBE_RUNTIME_UID:-10001}
+      PROBE_RUNTIME_GID: ${PROBE_RUNTIME_GID:-10001}
+    command: ["mkdir -p /attestation && chown -R $${PROBE_RUNTIME_UID}:$${PROBE_RUNTIME_GID} /attestation && chmod 0700 /attestation"]
     volumes:
       - ./.data/attestation:/attestation
     restart: "no"
@@ -216,6 +236,7 @@ services:
 
   revocation-probe:
     image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/revocation-probe:local
+    user: "${PROBE_RUNTIME_UID:-10001}:${PROBE_RUNTIME_GID:-10001}"
     build:
       context: ./services/revocation-probe
     container_name: pki-revocation-probe
@@ -312,6 +333,7 @@ services:
   # responder path; no Linux network capability is required.
   chaos-runner:
     image: ${COMPOSE_PROJECT_NAME:-pki-sentinel}/revocation-probe:local
+    user: "${PROBE_RUNTIME_UID:-10001}:${PROBE_RUNTIME_GID:-10001}"
     build:
       context: ./services/revocation-probe
     container_name: pki-chaos-runner

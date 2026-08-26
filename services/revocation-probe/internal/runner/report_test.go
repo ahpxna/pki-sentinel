@@ -14,6 +14,7 @@ func TestCycleReportCanonicalJSONIsStableAndCompact(t *testing.T) {
 		CycleID:        "cycle-1",
 		Scenario:       profiles.Scenario("revoked_staple"),
 		ScenarioDigest: "sha256:scenario",
+		ConfigDigest:   "sha256:config",
 		RevokeAckAt:    time.Date(2026, 8, 25, 21, 0, 0, 0, time.UTC),
 		Results:        []profiles.Result{},
 	}

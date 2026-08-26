@@ -1,0 +1,13 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "vault_pki_secret_backend_config_urls.int",
+      "type": "vault_pki_secret_backend_config_urls",
+      "change": {
+        "actions": ["delete"],
+        "after": null
+      }
+    }
+  ]
+}

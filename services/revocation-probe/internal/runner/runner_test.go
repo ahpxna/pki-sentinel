@@ -69,7 +69,10 @@ func TestPollOneDoesNotConvertHarnessErrorToSoftFail(t *testing.T) {
 }
 
 func TestRunOnceRejectsUnknownScenarioBeforeIssuing(t *testing.T) {
-	r := &Runner{Scenario: profiles.Scenario("missing"), Scenarios: testScenarios("unused")}
+	r := &Runner{
+		Config:   &config.Config{Profiles: []config.ProfileConfig{{Name: "unused", Enabled: true, Timeout: time.Second}}},
+		Scenario: profiles.Scenario("missing"), Scenarios: testScenarios("unused"),
+	}
 	if report, err := r.RunOnce(context.Background()); err == nil || report != nil {
 		t.Fatalf("RunOnce report=%v err=%v, want missing-scenario failure before issuer use", report, err)
 	}
@@ -77,7 +80,10 @@ func TestRunOnceRejectsUnknownScenarioBeforeIssuing(t *testing.T) {
 
 func TestRunOnceRejectsInvalidManifestStaplingBeforeIssuing(t *testing.T) {
 	scenarioID := profiles.Scenario("invalid")
-	r := &Runner{Scenario: scenarioID, Scenarios: scenarios.New(scenarios.Manifest{ID: scenarioID, Digest: "sha256:test", Stapling: scenarios.StaplingMode("maybe")})}
+	r := &Runner{
+		Config:   &config.Config{Profiles: []config.ProfileConfig{{Name: "unused", Enabled: true, Timeout: time.Second}}},
+		Scenario: scenarioID, Scenarios: scenarios.New(scenarios.Manifest{ID: scenarioID, Digest: "sha256:test", Stapling: scenarios.StaplingMode("maybe")}),
+	}
 	if report, err := r.RunOnce(context.Background()); err == nil || report != nil {
 		t.Fatalf("RunOnce report=%v err=%v, want invalid-stapling failure before issuer use", report, err)
 	}
@@ -206,5 +212,60 @@ func TestSortResultsIsDeterministic(t *testing.T) {
 	sortResults(results)
 	if results[0].Profile != "a" || results[1].Profile != "m" || results[2].Profile != "z" {
 		t.Fatalf("results are not sorted deterministically: %#v", results)
+	}
+}
+
+func TestRunOnceRejectsZeroEnabledProfilesBeforeIssuing(t *testing.T) {
+	r := &Runner{
+		Config:    &config.Config{Profiles: []config.ProfileConfig{{Name: "client", Enabled: false, Timeout: time.Second}}},
+		Scenario:  profiles.Scenario("test"),
+		Scenarios: testScenarios("client"),
+	}
+	if report, err := r.RunOnce(context.Background()); err == nil || report != nil {
+		t.Fatalf("RunOnce report=%v err=%v, want zero-profile failure before issuer use", report, err)
+	}
+}
+
+func TestPublicationErrorFailsClosedUntilRevocationIsObserved(t *testing.T) {
+	method := profiles.MethodOCSPDirect
+	if err := publicationError(method, nil); err == nil {
+		t.Fatal("empty oracle result set established publication")
+	}
+	if err := publicationError(method, []profiles.Result{{
+		Profile: "oracle", Method: method, Decision: profiles.DecisionInconclusive,
+		Reason: profiles.ReasonNetworkFailure, ExpectationMet: false,
+	}}); err == nil {
+		t.Fatal("inconclusive oracle result established publication")
+	}
+	if err := publicationError(method, []profiles.Result{{
+		Profile: "oracle", Method: method, Decision: profiles.DecisionHarnessError,
+		Reason: profiles.ReasonHarnessFailure, Err: "executor unavailable",
+	}}); err == nil {
+		t.Fatal("harness error established publication")
+	}
+	if err := publicationError(method, []profiles.Result{{
+		Profile: "oracle", Method: method, Decision: profiles.DecisionReject,
+		Reason: profiles.ReasonRevoked, ExpectationMet: true,
+	}}); err != nil {
+		t.Fatalf("revoked oracle result did not establish publication: %v", err)
+	}
+}
+
+func TestWaitForEvidencePropagatesPublicationFailure(t *testing.T) {
+	scenarioID := profiles.Scenario("publication_failure")
+	r := &Runner{Scenarios: scenarios.New(scenarios.Manifest{
+		ID: scenarioID,
+		EvidenceDependencies: map[string][]scenarios.EvidenceDependency{
+			"client": {scenarios.EvidenceOCSPPublished},
+		},
+	})}
+	ready := make(chan struct{})
+	publicationErr := errors.New("publication not established")
+	close(ready)
+	err := r.waitForEvidence(context.Background(), scenarioID, "client", map[scenarios.EvidenceDependency]evidenceBarrier{
+		scenarios.EvidenceOCSPPublished: {ready: ready, err: func() error { return publicationErr }},
+	})
+	if err == nil || !errors.Is(err, publicationErr) {
+		t.Fatalf("waitForEvidence error=%v, want publication failure", err)
 	}
 }

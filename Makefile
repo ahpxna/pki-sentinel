@@ -7,8 +7,8 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n",$$1,$$2}'
 
 .PHONY: env
-env: ## Create .env from .env.example if it does not exist
-	@test -f .env || cp .env.example .env
+env: ## Create/update .env and align probe bind-mount UID/GID with the host user
+	./scripts/prepare-compose-env.sh
 
 .PHONY: prepare-dev-tls
 prepare-dev-tls: ## Generate the local-only TLS certificate used by the Vault ACME endpoint
@@ -33,6 +33,9 @@ clean: ## Stop the stack and wipe all local state
 	docker compose --env-file $(COMPOSE_ENV_FILE) \
 	  -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.wazuh.yml \
 	  --profile app --profile tools --profile chaos --profile wazuh down -v --remove-orphans
+	@if [ -d .data ]; then \
+	  docker compose --env-file $(COMPOSE_ENV_FILE) -f docker-compose.yml run --rm --no-deps state-cleaner; \
+	fi
 	rm -rf .data
 	rm -f terraform/bootstrap/terraform.tfstate terraform/bootstrap/terraform.tfstate.backup
 

@@ -54,7 +54,7 @@ profiles:
 func TestLoadDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "profiles.yaml")
-	if err := os.WriteFile(path, []byte("profiles: []\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("profiles:\n  - name: curl-default\n    enabled: true\n    timeout: 5s\n"), 0o644); err != nil {
 		t.Fatalf("writing fixture: %v", err)
 	}
 	cfg, err := Load(path)
@@ -123,5 +123,61 @@ func TestLoadRejectsMultipleDocuments(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected multiple YAML documents to be rejected")
+	}
+}
+
+func TestLoadRejectsZeroEnabledProfiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profiles.yaml")
+	if err := os.WriteFile(path, []byte("profiles:\n  - name: curl-default\n    enabled: false\n    timeout: 5s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected config with no enabled profiles to be rejected")
+	}
+}
+
+func TestDigestBindsEffectiveConfigurationButNotYAMLFormatting(t *testing.T) {
+	dir := t.TempDir()
+	firstPath := filepath.Join(dir, "first.yaml")
+	secondPath := filepath.Join(dir, "second.yaml")
+	changedPath := filepath.Join(dir, "changed.yaml")
+	first := "poll_interval: 2s\nprofiles:\n  - name: curl-default\n    enabled: true\n    timeout: 5s\n"
+	second := "# same effective config\npoll_interval: 2s\n\nprofiles:\n  - name: curl-default\n    enabled: true\n    timeout: 5s\n"
+	changed := "poll_interval: 3s\nprofiles:\n  - name: curl-default\n    enabled: true\n    timeout: 5s\n"
+	for path, contents := range map[string]string{firstPath: first, secondPath: second, changedPath: changed} {
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstCfg, err := Load(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCfg, err := Load(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedCfg, err := Load(changedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDigest, err := firstCfg.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := secondCfg.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedDigest, err := changedCfg.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDigest != secondDigest {
+		t.Fatalf("formatting changed config digest: %s != %s", firstDigest, secondDigest)
+	}
+	if firstDigest == changedDigest {
+		t.Fatalf("runtime config change did not change digest: %s", firstDigest)
 	}
 }

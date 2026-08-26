@@ -74,6 +74,9 @@ func Remote(profile profiles.Profile, baseURL string) profiles.Profile {
 		if err := json.NewDecoder(io.LimitReader(response.Body, maxRequestBytes)).Decode(&observation); err != nil {
 			return profiles.Observation{}, fmt.Errorf("decode executor response: %w", err)
 		}
+		if observation.HarnessError != "" {
+			return observation, fmt.Errorf("executor %s: %s", profile.Name, observation.HarnessError)
+		}
 		return observation, nil
 	}
 	return profile
@@ -187,6 +190,7 @@ func Serve(ctx context.Context, address, profileName string) error {
 		if err != nil {
 			observation.Decision = profiles.DecisionHarnessError
 			observation.Reason = profiles.ReasonHarnessFailure
+			observation.HarnessError = err.Error()
 		}
 		observation.Evidence.Executor = executorID
 		w.Header().Set("Content-Type", "application/json")

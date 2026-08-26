@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - run: cp .env.example .env
+      - run: ./scripts/prepare-compose-env.sh
       - run: docker compose -f docker-compose.yml config -q
       - run: docker compose -f docker-compose.yml -f docker-compose.observability.yml config -q
       - run: docker compose -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.wazuh.yml config -q
@@ -121,19 +121,9 @@ jobs:
           terraform_version: "1.9.5"
       - name: generate integration attestation key
         run: ./scripts/generate-attestation-key.sh
-      - name: prepare attestation bind-mount ownership
-        run: |
-          # revocation-probe is pinned to UID/GID 10001:10001. Linux bind mounts
-          # preserve host numeric ownership, while the generated private key is
-          # intentionally 0600. Hand only this ignored CI fixture directory to
-          # the non-root probe instead of weakening the private-key mode.
-          sudo chown -R 10001:10001 .data/attestation
-          sudo chmod 0700 .data/attestation
-          sudo chmod 0600 .data/attestation/assurance.key
-          sudo chmod 0644 .data/attestation/assurance.pub
       - name: start stack
         run: |
-          cp .env.example .env
+          ./scripts/prepare-compose-env.sh
           ./scripts/prepare-dev-tls.sh
           source scripts/lib/wait_for.sh
           start_stack() {
@@ -172,18 +162,21 @@ jobs:
           (cd services/truststore-drift-agent && go build -o bin/truststore-drift-agent .)
       - name: run one probe cycle
         run: |
-          # The image ENTRYPOINT is `probe`; docker compose run appends the
-          # command below to that entrypoint, so pass only the subcommand.
+          # Bootstrap already started the controller container. Execute the
+          # one-shot cycle in that same network namespace so profile executors
+          # resolve the single revocation-probe alias that actually serves the
+          # ephemeral canary; compose run --use-aliases would create an
+          # ambiguous second container with the same DNS alias.
           cycle_status=0
-          docker compose run --rm --no-deps -T --use-aliases revocation-probe \
-            run --once --output json \
+          docker compose exec -T revocation-probe \
+            probe run --once --output json \
               --attestation-key /run/attestation/assurance.key \
               --attestation-out /run/attestation/last-cycle.attestation.json > /tmp/cycle.json 2> /tmp/attested-cycle.stderr || cycle_status=$?
           # A failed-but-reportable cycle is still evidence. Copy its report,
-          # public key, and attestation out of the Compose volume before the
-          # step exits so invalid trials remain inspectable in CI artifacts.
-          docker compose run --rm --no-deps -T --entrypoint cat revocation-probe /run/attestation/assurance.pub > /tmp/assurance.pub || true
-          docker compose run --rm --no-deps -T --entrypoint cat revocation-probe /run/attestation/last-cycle.attestation.json > /tmp/last-cycle.attestation.json || true
+          # public key, and attestation before the step exits so invalid trials
+          # remain inspectable in CI artifacts.
+          docker compose exec -T revocation-probe cat /run/attestation/assurance.pub > /tmp/assurance.pub || true
+          docker compose exec -T revocation-probe cat /run/attestation/last-cycle.attestation.json > /tmp/last-cycle.attestation.json || true
           if (( cycle_status != 0 )); then
             cycle_diagnostics="$(tail -n 80 /tmp/attested-cycle.stderr)"
             cycle_diagnostics="${cycle_diagnostics//'%'/'%25'}"
@@ -195,8 +188,8 @@ jobs:
             cat /tmp/attested-cycle.stderr
             exit "$cycle_status"
           fi
-          docker compose run --rm --no-deps -T revocation-probe \
-            attest verify --public-key /run/attestation/assurance.pub \
+          docker compose exec -T revocation-probe \
+            probe attest verify --public-key /run/attestation/assurance.pub \
               --input /run/attestation/last-cycle.attestation.json
           cat /tmp/cycle.json
           echo

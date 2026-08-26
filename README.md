@@ -92,9 +92,10 @@ see [`docs/architecture.md`](docs/architecture.md) for the full diagram and
   issuer, CRL, and target-service traffic remain unaffected.
 - One network-isolated executor container per status-oracle or client profile.
   The controller runs no profile subprocesses when deployed through Compose.
-- Versioned, strict scenario manifests with canonical SHA-256 digests that are
-  included in every cycle report and bound into Ed25519-signed, tamper-evident
-  assurance-report envelopes, with an offline verification command.
+- Versioned, strict scenario manifests plus a canonical digest of the effective
+  runtime profile configuration. Both digests are included in every cycle report
+  and bound into Ed25519-signed, tamper-evident assurance-report envelopes, with
+  an offline verification command.
 - A trust-store exporter with `/metrics` and `/events`, signed-baseline
   verification, and detection of added, removed, changed, expired, and
   expiring roots.
@@ -139,7 +140,9 @@ consistent even though the macOS system curl lacks `--cert-status` support.
 
 Create a local demo keypair, then run a cycle. The key lives only under the
 ignored `.data/attestation/` directory; it must be replaced with an external
-KMS/HSM signer in production.
+KMS/HSM signer in production. `make env` also aligns the probe container's
+non-root UID/GID with the invoking host user so bind-mounted evidence remains
+readable and cleanable on Linux without weakening private-key permissions.
 
 ```bash
 make attestation-key
@@ -156,10 +159,13 @@ public key. A standalone process can produce the same envelope with
 
 Status oracles start immediately after issuer acknowledgement. Each client
 waits for the evidence boundary declared for it in the selected scenario
-manifest; the client method is not the source of that scheduling decision. The
-report separately records status propagation, staple distribution, and client
-enforcement timing. A result satisfies an explicit scenario contract; a TLS or
-network failure is `INCONCLUSIVE`, not a successful rejection.
+manifest; the client method is not the source of that scheduling decision.
+OCSP/CRL publication boundaries fail closed: they open only after an enabled
+status oracle actually observes `REJECT / REVOKED`, never merely because its
+polling goroutine finished. The report separately records status propagation,
+staple distribution, and client enforcement timing. A result satisfies an
+explicit scenario contract; a TLS or network failure is `INCONCLUSIVE`, not a
+successful rejection.
 
 | Profile | Role | Method | `revoked_staple` contract |
 |---|---|---|---|

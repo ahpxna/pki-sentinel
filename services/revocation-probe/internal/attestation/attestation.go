@@ -4,6 +4,7 @@
 package attestation
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
@@ -12,11 +13,12 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
 
-const Version = "pki-sentinel-assurance/v2"
+const Version = "pki-sentinel-assurance/v3"
 
 // Statement is the complete signed to-be-signed record. The payload itself is
 // content-addressed, so changing any envelope metadata that gives the report
@@ -26,6 +28,7 @@ type Statement struct {
 	IssuedAt        time.Time `json:"issued_at"`
 	RunID           string    `json:"run_id"`
 	ScenarioDigest  string    `json:"scenario_digest"`
+	ConfigDigest    string    `json:"config_digest"`
 	PayloadSHA256   string    `json:"payload_sha256"`
 	PublicKeySHA256 string    `json:"public_key_sha256"`
 }
@@ -80,8 +83,11 @@ func SignJSON(privateKeyPEM []byte, payloadJSON []byte, now time.Time) (Envelope
 	if !json.Valid(payloadJSON) {
 		return Envelope{}, fmt.Errorf("attestation payload is not valid JSON")
 	}
+	if err := rejectDuplicateJSONKeys(payloadJSON); err != nil {
+		return Envelope{}, fmt.Errorf("attestation payload: %w", err)
+	}
 	payload := append(json.RawMessage(nil), payloadJSON...)
-	runID, scenarioDigest, err := payloadIdentity(payload)
+	runID, scenarioDigest, configDigest, err := payloadIdentity(payload)
 	if err != nil {
 		return Envelope{}, err
 	}
@@ -94,6 +100,7 @@ func SignJSON(privateKeyPEM []byte, payloadJSON []byte, now time.Time) (Envelope
 		IssuedAt:        now.UTC(),
 		RunID:           runID,
 		ScenarioDigest:  scenarioDigest,
+		ConfigDigest:    configDigest,
 		PayloadSHA256:   hex.EncodeToString(payloadHash[:]),
 		PublicKeySHA256: hex.EncodeToString(publicKeyHash[:]),
 	}
@@ -117,7 +124,10 @@ func Verify(publicKeyPEM []byte, envelope Envelope) error {
 	if !json.Valid(envelope.Payload) {
 		return fmt.Errorf("attestation payload is not valid JSON")
 	}
-	runID, scenarioDigest, err := payloadIdentity(envelope.Payload)
+	if err := rejectDuplicateJSONKeys(envelope.Payload); err != nil {
+		return fmt.Errorf("attestation payload: %w", err)
+	}
+	runID, scenarioDigest, configDigest, err := payloadIdentity(envelope.Payload)
 	if err != nil {
 		return err
 	}
@@ -126,6 +136,9 @@ func Verify(publicKeyPEM []byte, envelope Envelope) error {
 	}
 	if envelope.Statement.ScenarioDigest != scenarioDigest {
 		return fmt.Errorf("attestation scenario digest does not match payload scenario_digest")
+	}
+	if envelope.Statement.ConfigDigest != configDigest {
+		return fmt.Errorf("attestation config digest does not match payload config_digest")
 	}
 	publicKey, err := parsePublicKey(publicKeyPEM)
 	if err != nil {
@@ -153,30 +166,98 @@ func Verify(publicKeyPEM []byte, envelope Envelope) error {
 	return nil
 }
 
-func payloadIdentity(payload json.RawMessage) (string, string, error) {
+func payloadIdentity(payload json.RawMessage) (string, string, string, error) {
 	var identity struct {
 		CycleID        string `json:"cycle_id"`
 		ScenarioDigest string `json:"scenario_digest"`
+		ConfigDigest   string `json:"config_digest"`
 	}
 	if err := json.Unmarshal(payload, &identity); err != nil {
-		return "", "", fmt.Errorf("decode attestation payload identity: %w", err)
+		return "", "", "", fmt.Errorf("decode attestation payload identity: %w", err)
 	}
 	if identity.CycleID == "" {
-		return "", "", fmt.Errorf("attestation payload cycle_id is required")
+		return "", "", "", fmt.Errorf("attestation payload cycle_id is required")
 	}
-	if !validScenarioDigest(identity.ScenarioDigest) {
-		return "", "", fmt.Errorf("attestation payload scenario_digest %q is not a canonical SHA-256 digest", identity.ScenarioDigest)
+	if !validDigest(identity.ScenarioDigest) {
+		return "", "", "", fmt.Errorf("attestation payload scenario_digest %q is not a canonical SHA-256 digest", identity.ScenarioDigest)
 	}
-	return identity.CycleID, identity.ScenarioDigest, nil
+	if !validDigest(identity.ConfigDigest) {
+		return "", "", "", fmt.Errorf("attestation payload config_digest %q is not a canonical SHA-256 digest", identity.ConfigDigest)
+	}
+	return identity.CycleID, identity.ScenarioDigest, identity.ConfigDigest, nil
 }
 
-func validScenarioDigest(value string) bool {
+func validDigest(value string) bool {
 	const prefix = "sha256:"
 	if len(value) != len(prefix)+sha256.Size*2 || value[:len(prefix)] != prefix {
 		return false
 	}
 	decoded, err := hex.DecodeString(value[len(prefix):])
 	return err == nil && len(decoded) == sha256.Size
+}
+
+func rejectDuplicateJSONKeys(contents []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	if err := scanJSONValue(decoder, "$", nil); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("unexpected trailing JSON value")
+		}
+		return fmt.Errorf("decode trailing JSON: %w", err)
+	}
+	return nil
+}
+
+func scanJSONValue(decoder *json.Decoder, path string, first json.Token) error {
+	token := first
+	var err error
+	if token == nil {
+		token, err = decoder.Token()
+		if err != nil {
+			return err
+		}
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]struct{}{}
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("%s: object key is not a string", path)
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("%s: duplicate JSON field %q", path, key)
+			}
+			seen[key] = struct{}{}
+			if err := scanJSONValue(decoder, path+"."+key, nil); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+		return err
+	case '[':
+		index := 0
+		for decoder.More() {
+			if err := scanJSONValue(decoder, fmt.Sprintf("%s[%d]", path, index), nil); err != nil {
+				return err
+			}
+			index++
+		}
+		_, err = decoder.Token()
+		return err
+	default:
+		return fmt.Errorf("%s: unexpected JSON delimiter %q", path, delim)
+	}
 }
 
 // ReadPrivateKey reads an Ed25519 PKCS#8 private-key PEM file.
@@ -197,8 +278,20 @@ func ReadEnvelope(path string) (Envelope, error) {
 	if err != nil {
 		return Envelope{}, fmt.Errorf("read attestation: %w", err)
 	}
+	if err := rejectDuplicateJSONKeys(contents); err != nil {
+		return Envelope{}, fmt.Errorf("decode attestation: %w", err)
+	}
 	var envelope Envelope
-	if err := json.Unmarshal(contents, &envelope); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&envelope); err != nil {
+		return Envelope{}, fmt.Errorf("decode attestation: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return Envelope{}, fmt.Errorf("decode attestation: multiple JSON values are not allowed")
+		}
 		return Envelope{}, fmt.Errorf("decode attestation: %w", err)
 	}
 	return envelope, nil

@@ -3,6 +3,9 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -13,9 +16,9 @@ import (
 
 // ProfileConfig is one entry under `profiles:` in profiles.yaml.
 type ProfileConfig struct {
-	Name    string        `yaml:"name"`
-	Enabled bool          `yaml:"enabled"`
-	Timeout time.Duration `yaml:"timeout"`
+	Name    string        `yaml:"name" json:"name"`
+	Enabled bool          `yaml:"enabled" json:"enabled"`
+	Timeout time.Duration `yaml:"timeout" json:"timeout_ns"`
 }
 
 // Config is the full profiles.yaml document.
@@ -34,15 +37,15 @@ type Config struct {
 // OCSPFreshnessConfig makes temporal status-acceptance assumptions explicit
 // in every experiment configuration.
 type OCSPFreshnessConfig struct {
-	MaxClockSkew            time.Duration `yaml:"max_clock_skew"`
-	RequireNextUpdate       bool          `yaml:"require_next_update"`
-	MaxAgeWithoutNextUpdate time.Duration `yaml:"max_age_without_next_update"`
+	MaxClockSkew            time.Duration `yaml:"max_clock_skew" json:"max_clock_skew_ns"`
+	RequireNextUpdate       bool          `yaml:"require_next_update" json:"require_next_update"`
+	MaxAgeWithoutNextUpdate time.Duration `yaml:"max_age_without_next_update" json:"max_age_without_next_update_ns"`
 }
 
 // PolicyConfig controls whether policy violations block an otherwise
 // baseline-conformant cycle.
 type PolicyConfig struct {
-	Enforce bool `yaml:"enforce"`
+	Enforce bool `yaml:"enforce" json:"enforce"`
 }
 
 // Load reads and parses profiles.yaml from path.
@@ -83,6 +86,7 @@ func Load(path string) (*Config, error) {
 		c.OCSPFreshness.MaxAgeWithoutNextUpdate = time.Hour
 	}
 	seenProfiles := make(map[string]struct{}, len(c.Profiles))
+	enabledProfiles := 0
 	for _, profile := range c.Profiles {
 		if profile.Name == "" {
 			return nil, fmt.Errorf("config: profile name must not be empty")
@@ -91,11 +95,50 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("config: duplicate profile %q", profile.Name)
 		}
 		seenProfiles[profile.Name] = struct{}{}
-		if profile.Enabled && profile.Timeout <= 0 {
-			return nil, fmt.Errorf("config: enabled profile %q must have a positive timeout", profile.Name)
+		if profile.Enabled {
+			enabledProfiles++
+			if profile.Timeout <= 0 {
+				return nil, fmt.Errorf("config: enabled profile %q must have a positive timeout", profile.Name)
+			}
 		}
 	}
+	if enabledProfiles == 0 {
+		return nil, fmt.Errorf("config: at least one profile must be enabled")
+	}
 	return &c, nil
+}
+
+// Digest returns a content digest of the effective execution configuration.
+// Defaults have already been applied by Load; hashing the typed in-memory
+// representation makes comments and YAML formatting irrelevant while binding
+// every runtime knob and profile selection that can affect a cycle.
+func (c *Config) Digest() (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("config: cannot digest nil config")
+	}
+	type canonicalConfig struct {
+		PollInterval  time.Duration       `json:"poll_interval_ns"`
+		MaxWait       time.Duration       `json:"max_wait_ns"`
+		MaxAttempts   int                 `json:"max_attempts"`
+		Profiles      []ProfileConfig     `json:"profiles"`
+		OCSPFreshness OCSPFreshnessConfig `json:"ocsp_freshness"`
+		Policy        PolicyConfig        `json:"policy"`
+	}
+	enabledProfiles := make([]ProfileConfig, 0, len(c.Profiles))
+	for _, profile := range c.Profiles {
+		if profile.Enabled {
+			enabledProfiles = append(enabledProfiles, profile)
+		}
+	}
+	canonical, err := json.Marshal(canonicalConfig{
+		PollInterval: c.PollInterval, MaxWait: c.MaxWait, MaxAttempts: c.MaxAttempts,
+		Profiles: enabledProfiles, OCSPFreshness: c.OCSPFreshness, Policy: c.Policy,
+	})
+	if err != nil {
+		return "", fmt.Errorf("config: marshal canonical config: %w", err)
+	}
+	sum := sha256.Sum256(canonical)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 // ValidateEnabledProfiles rejects misspelled or stale enabled profile names.

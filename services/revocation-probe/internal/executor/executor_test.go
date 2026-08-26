@@ -1,6 +1,11 @@
 package executor
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
@@ -61,5 +66,30 @@ func TestRequiredExecutorTokenAllowsExplicitLocalOptOut(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_EXECUTOR", "1")
 	if token, err := requiredExecutorToken(); err != nil || token != "" {
 		t.Fatalf("explicit local opt-out rejected: token=%q err=%v", token, err)
+	}
+}
+
+func TestRemotePreservesExecutorHarnessError(t *testing.T) {
+	t.Setenv("PROBE_EXECUTOR_TOKEN", "test-token")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("authorization=%q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(profiles.Observation{
+			Decision:     profiles.DecisionHarnessError,
+			Reason:       profiles.ReasonHarnessFailure,
+			HarnessError: "openssl exited with status 2",
+		})
+	}))
+	defer server.Close()
+
+	profile := Remote(profiles.Profile{Name: "openssl-ocsp-direct"}, server.URL)
+	observation, err := profile.Probe(context.Background(), profiles.Target{})
+	if err == nil || !strings.Contains(err.Error(), "openssl exited with status 2") {
+		t.Fatalf("Probe error=%v, want remote harness cause", err)
+	}
+	if observation.Decision != profiles.DecisionHarnessError || observation.Reason != profiles.ReasonHarnessFailure {
+		t.Fatalf("unexpected observation: %#v", observation)
 	}
 }

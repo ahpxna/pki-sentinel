@@ -75,7 +75,9 @@ Status oracles start immediately after issuer acknowledgement. Client
 executors do not wait for an unrelated global oracle barrier: every client
 waits only for the evidence dependencies declared by the selected scenario.
 The controller rejects a scenario when an enabled client requires an OCSP/CRL
-publication boundary without an enabled status-oracle producer. The report
+publication boundary without an enabled status-oracle producer. At runtime the
+publication barrier itself also fails closed: completion without an observed
+`REJECT / REVOKED` does not release dependent clients. The report
 retains each profile's pre-revocation BEFORE observation, the acknowledgement
 timestamp, first OCSP/CRL revoked observations, staple publication, and a
 per-client first attempt/decision. It also derives separate propagation,
@@ -89,8 +91,10 @@ labels.
 
 An optional Ed25519 attestation envelope signs a to-be-signed statement that
 binds the exact report SHA-256, issue time, non-empty run ID, canonical scenario
-digest, and public-key SHA-256. Verification re-derives the run ID and scenario
-digest from the signed payload and rejects statement/payload disagreement. It
+digest, canonical effective-config digest, and public-key SHA-256. Verification
+re-derives the run ID and both digests from the signed payload and rejects
+statement/payload disagreement. Envelope decoding also rejects unknown or
+duplicate JSON fields before signature verification. It
 can be verified without the controller. A local file key is only a demo
 integration; production keys belong behind an external KMS or HSM signing
 boundary.

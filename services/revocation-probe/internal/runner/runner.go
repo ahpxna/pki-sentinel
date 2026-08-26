@@ -51,6 +51,7 @@ type CycleReport struct {
 	CycleID        string                     `json:"cycle_id"`
 	Scenario       profiles.Scenario          `json:"scenario"`
 	ScenarioDigest string                     `json:"scenario_digest"`
+	ConfigDigest   string                     `json:"config_digest"`
 	Valid          bool                       `json:"valid"`
 	Phase          CyclePhase                 `json:"phase"`
 	RevokeAckAt    time.Time                  `json:"revoke_ack_at"`
@@ -107,6 +108,16 @@ type Timeline struct {
 
 // RunOnce executes exactly one probe cycle.
 func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
+	if r.Config == nil {
+		return nil, fmt.Errorf("runner: config is required")
+	}
+	if len(r.Config.EnabledNames()) == 0 {
+		return nil, fmt.Errorf("runner: at least one profile must be enabled")
+	}
+	configDigest, err := r.Config.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("runner: digest config: %w", err)
+	}
 	scenario := r.Scenario
 	if scenario == "" {
 		return nil, fmt.Errorf("runner: scenario is required")
@@ -125,7 +136,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	cycleID := uuid.NewString()
 	hostname := fmt.Sprintf("canary-%s.canary.%s", cycleID, r.Domain)
 	report := &CycleReport{
-		CycleID: cycleID, Scenario: scenario, ScenarioDigest: manifest.Digest,
+		CycleID: cycleID, Scenario: scenario, ScenarioDigest: manifest.Digest, ConfigDigest: configDigest,
 		Phase: PhaseIssue, Results: []profiles.Result{},
 	}
 	fail := func(phase CyclePhase, err error) (*CycleReport, error) {
@@ -247,13 +258,19 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	crlPublishedReady := make(chan struct{})
 	ocspDone := make(chan []profiles.Result, 1)
 	crlDone := make(chan []profiles.Result, 1)
+	var ocspPublishedErr error
+	var crlPublishedErr error
 	go func() {
-		defer close(ocspPublishedReady)
-		ocspDone <- r.pollMethod(ctx, profiles.MethodOCSPDirect, target, revokeAckAt)
+		results := r.pollMethod(ctx, profiles.MethodOCSPDirect, target, revokeAckAt)
+		ocspPublishedErr = publicationError(profiles.MethodOCSPDirect, results)
+		ocspDone <- results
+		close(ocspPublishedReady)
 	}()
 	go func() {
-		defer close(crlPublishedReady)
-		crlDone <- r.pollMethod(ctx, profiles.MethodCRL, target, revokeAckAt)
+		results := r.pollMethod(ctx, profiles.MethodCRL, target, revokeAckAt)
+		crlPublishedErr = publicationError(profiles.MethodCRL, results)
+		crlDone <- results
+		close(crlPublishedReady)
 	}()
 
 	stapleReady := make(chan struct{})
@@ -272,8 +289,8 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 
 	barriers := map[scenarios.EvidenceDependency]evidenceBarrier{
 		scenarios.EvidenceIssuerAck:       {ready: issuerAckReady},
-		scenarios.EvidenceOCSPPublished:   {ready: ocspPublishedReady},
-		scenarios.EvidenceCRLPublished:    {ready: crlPublishedReady},
+		scenarios.EvidenceOCSPPublished:   {ready: ocspPublishedReady, err: func() error { return ocspPublishedErr }},
+		scenarios.EvidenceCRLPublished:    {ready: crlPublishedReady, err: func() error { return crlPublishedErr }},
 		scenarios.EvidenceStaplePublished: {ready: stapleReady, err: func() error { return stapleErr }},
 	}
 	clients := r.pollClients(ctx, target, revokeAckAt, barriers)
@@ -347,6 +364,28 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	metrics.CycleTotal.WithLabelValues("ok").Inc()
 	report.Phase = PhaseComplete
 	return report, nil
+}
+
+func publicationError(method profiles.CheckMethod, results []profiles.Result) error {
+	if len(results) == 0 {
+		return fmt.Errorf("no enabled %s status oracle produced publication evidence", method)
+	}
+	published := false
+	for _, result := range results {
+		if result.Decision == profiles.DecisionHarnessError || result.Err != "" {
+			if result.Err != "" {
+				return fmt.Errorf("status oracle %s failed while establishing %s publication: %s", result.Profile, method, result.Err)
+			}
+			return fmt.Errorf("status oracle %s failed while establishing %s publication", result.Profile, method)
+		}
+		if result.ExpectationMet && result.Decision == profiles.DecisionReject && result.Reason == profiles.ReasonRevoked {
+			published = true
+		}
+	}
+	if !published {
+		return fmt.Errorf("%s publication was not established as REJECT/REVOKED", method)
+	}
+	return nil
 }
 
 func sortResults(results []profiles.Result) {
