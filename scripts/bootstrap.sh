@@ -74,8 +74,21 @@ echo "[bootstrap]     sealed=false — auto-unseal confirmed."
 
 token_is_valid() {
   local token="$1"
-  [[ -n "${token}" ]] && [[ "$(curl -s -o /dev/null -w '%{http_code}' \
-    --header "X-Vault-Token: ${token}" "${VAULT_ADDR}/v1/auth/token/lookup-self")" == "200" ]]
+  [[ -n "${token}" ]] || return 1
+
+  # Vault can report unsealed immediately after operator init while its active
+  # request path is still converging. Retry the authenticated lookup so a
+  # transient 403 is not mistaken for a revoked root token.
+  local attempt status
+  for ((attempt = 1; attempt <= 15; attempt++)); do
+    status="$(curl -s -o /dev/null -w '%{http_code}' \
+      --header "X-Vault-Token: ${token}" "${VAULT_ADDR}/v1/auth/token/lookup-self")"
+    if [[ "${status}" == "200" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 TF_TOKEN=""

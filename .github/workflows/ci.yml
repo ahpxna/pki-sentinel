@@ -149,6 +149,7 @@ jobs:
           wait_for_http "http://localhost:8200/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204" 120
       - name: bootstrap
         run: |
+          set -o pipefail
           if ! ./scripts/bootstrap.sh 2>&1 | tee /tmp/bootstrap.log; then
             bootstrap_diagnostics="$(tail -n 120 /tmp/bootstrap.log)"
             bootstrap_diagnostics="${bootstrap_diagnostics//'%'/'%25'}"

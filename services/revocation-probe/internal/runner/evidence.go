@@ -286,7 +286,9 @@ func writeAtomicPrivateRootFile(root *os.Root, path string, contents []byte, rep
 	if err != nil {
 		return err
 	}
-	defer root.Remove(temporaryName)
+	defer func() {
+		_ = root.Remove(temporaryName)
+	}()
 	if _, err := temporary.Write(contents); err != nil {
 		_ = temporary.Close()
 		return err
