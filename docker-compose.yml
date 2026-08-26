@@ -183,7 +183,7 @@ services:
           echo "vault-seal root token is missing; persistent seal state cannot be administered" >&2
           exit 1
         fi
-        export VAULT_TOKEN="$$(cat /run/vault-seal-admin/root-token)"
+        export VAULT_TOKEN="$(cat /run/vault-seal-admin/root-token)"
         if ! vault secrets list -format=json | grep -q '"transit/"'; then
           vault secrets enable transit >/dev/null
         fi
@@ -200,7 +200,7 @@ services:
         }
         POLICY
         if [ -s /run/vault-seal-runtime/transit-token ] && \
-          VAULT_TOKEN="$$(cat /run/vault-seal-runtime/transit-token)" vault token lookup >/dev/null 2>&1; then
+          VAULT_TOKEN="$(cat /run/vault-seal-runtime/transit-token)" vault token lookup >/dev/null 2>&1; then
           exit 0
         fi
         umask 077
@@ -242,7 +242,7 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        export VAULT_TOKEN="$$(cat /run/vault-seal/transit-token)"
+        export VAULT_TOKEN="$(cat /run/vault-seal/transit-token)"
         exec /usr/local/bin/docker-entrypoint.sh vault server -config=/vault/config/vault.hcl
     environment:
       VAULT_ADDR: http://127.0.0.1:8200
