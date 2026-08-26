@@ -114,12 +114,28 @@ services:
     networks: [pki-sentinel]
     volumes:
       - ./.data/vault-seal:/vault/seal
+    depends_on:
+      vault-seal-storage-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "vault", "status"]
       interval: 5s
       timeout: 3s
       retries: 12
       start_period: 5s
+
+  # Linux bind mounts are created as root. Vault runs as UID 100/GID 1000, so
+  # normalize the persistent seal volume before the server opens vault.db.
+  vault-seal-storage-init:
+    image: ${VAULT_IMAGE}
+    container_name: pki-vault-seal-storage-init
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["mkdir -p /vault/seal/config /vault/seal/data && chown -R 100:1000 /vault/seal/data && chmod 0700 /vault/seal/data"]
+    volumes:
+      - ./.data/vault-seal:/vault/seal
+    restart: "no"
 
   # One-shot dependency gate: the primary Vault cannot even parse its transit
   # seal stanza until this mount and key exist. Keeping this in Compose makes
