@@ -23,24 +23,36 @@ type ProfileConfig struct {
 
 // Config is the full profiles.yaml document.
 type Config struct {
-	PollInterval    time.Duration       `yaml:"poll_interval"`
-	MaxWait         time.Duration       `yaml:"max_wait"`
-	MaxAttempts     int                 `yaml:"max_attempts"`
-	PreflightMaxAge time.Duration       `yaml:"preflight_max_age"`
-	Profiles        []ProfileConfig     `yaml:"profiles"`
-	OCSPFreshness   OCSPFreshnessConfig `yaml:"ocsp_freshness"`
-	Policy          PolicyConfig        `yaml:"policy"`
+	PollInterval    time.Duration         `yaml:"poll_interval"`
+	MaxWait         time.Duration         `yaml:"max_wait"`
+	MaxAttempts     int                   `yaml:"max_attempts"`
+	PreflightMaxAge time.Duration         `yaml:"preflight_max_age"`
+	Profiles        []ProfileConfig       `yaml:"profiles"`
+	StatusFreshness StatusFreshnessConfig `yaml:"status_freshness"`
+	OCSPFreshness   OCSPFreshnessConfig   `yaml:"ocsp_freshness"`
+	CRLFreshness    CRLFreshnessConfig    `yaml:"crl_freshness"`
+	Policy          PolicyConfig          `yaml:"policy"`
 
 	// Cycle interval and Vault/service wiring are supplied via flags/env in
 	// cmd/probe rather than profiles.yaml, since they're deployment-specific.
 }
 
-// OCSPFreshnessConfig makes temporal status-acceptance assumptions explicit
-// in every experiment configuration.
+// StatusFreshnessConfig holds temporal assumptions shared by every status
+// protocol, so clock-skew policy cannot diverge silently between OCSP and CRL.
+type StatusFreshnessConfig struct {
+	MaxClockSkew time.Duration `yaml:"max_clock_skew" json:"max_clock_skew_ns"`
+}
+
+// OCSPFreshnessConfig holds OCSP-specific freshness controls.
 type OCSPFreshnessConfig struct {
-	MaxClockSkew            time.Duration `yaml:"max_clock_skew" json:"max_clock_skew_ns"`
 	RequireNextUpdate       bool          `yaml:"require_next_update" json:"require_next_update"`
 	MaxAgeWithoutNextUpdate time.Duration `yaml:"max_age_without_next_update" json:"max_age_without_next_update_ns"`
+}
+
+// CRLFreshnessConfig holds CRL-specific freshness controls.
+type CRLFreshnessConfig struct {
+	RequireNextUpdate bool          `yaml:"require_next_update" json:"require_next_update"`
+	MaxAge            time.Duration `yaml:"max_age" json:"max_age_ns"`
 }
 
 // PolicyConfig controls whether policy violations block an otherwise
@@ -83,14 +95,17 @@ func Load(path string) (*Config, error) {
 	if c.PollInterval < 0 || c.MaxWait < 0 || c.MaxAttempts < 0 || c.PreflightMaxAge <= 0 {
 		return nil, fmt.Errorf("config: poll_interval, max_wait, max_attempts, and preflight_max_age must be positive")
 	}
-	if c.OCSPFreshness.MaxClockSkew < 0 || c.OCSPFreshness.MaxAgeWithoutNextUpdate < 0 {
-		return nil, fmt.Errorf("config: ocsp_freshness durations must not be negative")
+	if c.StatusFreshness.MaxClockSkew < 0 || c.OCSPFreshness.MaxAgeWithoutNextUpdate < 0 || c.CRLFreshness.MaxAge < 0 {
+		return nil, fmt.Errorf("config: status, OCSP, and CRL freshness durations must not be negative")
 	}
-	if c.OCSPFreshness.MaxClockSkew == 0 {
-		c.OCSPFreshness.MaxClockSkew = 5 * time.Minute
+	if c.StatusFreshness.MaxClockSkew == 0 {
+		c.StatusFreshness.MaxClockSkew = 5 * time.Minute
 	}
 	if c.OCSPFreshness.MaxAgeWithoutNextUpdate == 0 {
 		c.OCSPFreshness.MaxAgeWithoutNextUpdate = time.Hour
+	}
+	if c.CRLFreshness.MaxAge == 0 {
+		c.CRLFreshness.MaxAge = time.Hour
 	}
 	seenProfiles := make(map[string]struct{}, len(c.Profiles))
 	enabledProfiles := 0
@@ -124,13 +139,15 @@ func (c *Config) Digest() (string, error) {
 		return "", fmt.Errorf("config: cannot digest nil config")
 	}
 	type canonicalConfig struct {
-		PollInterval    time.Duration       `json:"poll_interval_ns"`
-		MaxWait         time.Duration       `json:"max_wait_ns"`
-		MaxAttempts     int                 `json:"max_attempts"`
-		PreflightMaxAge time.Duration       `json:"preflight_max_age_ns"`
-		Profiles        []ProfileConfig     `json:"profiles"`
-		OCSPFreshness   OCSPFreshnessConfig `json:"ocsp_freshness"`
-		Policy          PolicyConfig        `json:"policy"`
+		PollInterval    time.Duration         `json:"poll_interval_ns"`
+		MaxWait         time.Duration         `json:"max_wait_ns"`
+		MaxAttempts     int                   `json:"max_attempts"`
+		PreflightMaxAge time.Duration         `json:"preflight_max_age_ns"`
+		Profiles        []ProfileConfig       `json:"profiles"`
+		StatusFreshness StatusFreshnessConfig `json:"status_freshness"`
+		OCSPFreshness   OCSPFreshnessConfig   `json:"ocsp_freshness"`
+		CRLFreshness    CRLFreshnessConfig    `json:"crl_freshness"`
+		Policy          PolicyConfig          `json:"policy"`
 	}
 	enabledProfiles := make([]ProfileConfig, 0, len(c.Profiles))
 	for _, profile := range c.Profiles {
@@ -140,7 +157,7 @@ func (c *Config) Digest() (string, error) {
 	}
 	canonical, err := json.Marshal(canonicalConfig{
 		PollInterval: c.PollInterval, MaxWait: c.MaxWait, MaxAttempts: c.MaxAttempts, PreflightMaxAge: c.PreflightMaxAge,
-		Profiles: enabledProfiles, OCSPFreshness: c.OCSPFreshness, Policy: c.Policy,
+		Profiles: enabledProfiles, StatusFreshness: c.StatusFreshness, OCSPFreshness: c.OCSPFreshness, CRLFreshness: c.CRLFreshness, Policy: c.Policy,
 	})
 	if err != nil {
 		return "", fmt.Errorf("config: marshal canonical config: %w", err)

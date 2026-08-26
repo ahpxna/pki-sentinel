@@ -502,7 +502,7 @@ func cmdChaos(args []string) {
 	if err != nil {
 		log.Fatalf("chaos sweep: vault login: %v", err)
 	}
-	cfg := &config.Config{PollInterval: 2 * time.Second, MaxWait: 30 * time.Second, MaxAttempts: 15, PreflightMaxAge: 2 * time.Second, OCSPFreshness: config.OCSPFreshnessConfig{MaxClockSkew: 5 * time.Minute, RequireNextUpdate: true, MaxAgeWithoutNextUpdate: time.Hour}}
+	cfg := &config.Config{PollInterval: 2 * time.Second, MaxWait: 30 * time.Second, MaxAttempts: 15, PreflightMaxAge: 2 * time.Second, StatusFreshness: config.StatusFreshnessConfig{MaxClockSkew: 5 * time.Minute}, OCSPFreshness: config.OCSPFreshnessConfig{RequireNextUpdate: true, MaxAgeWithoutNextUpdate: time.Hour}, CRLFreshness: config.CRLFreshnessConfig{RequireNextUpdate: true, MaxAge: time.Hour}}
 	for _, p := range profiles.Registry() {
 		if p.Name == "openssl-ocsp-direct" {
 			cfg.Profiles = append(cfg.Profiles, config.ProfileConfig{Name: p.Name, Enabled: true})

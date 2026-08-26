@@ -16,16 +16,18 @@ import (
 // experiment inputs that are not already carried by the scenario manifest.
 // Durations are encoded as nanoseconds to avoid text-format ambiguity.
 type RunConfigSnapshot struct {
-	ProfileConfigDigest string                `json:"profile_config_digest"`
-	PollIntervalNS      int64                 `json:"poll_interval_ns"`
-	MaxWaitNS           int64                 `json:"max_wait_ns"`
-	MaxAttempts         int                   `json:"max_attempts"`
-	PreflightMaxAgeNS   int64                 `json:"preflight_max_age_ns"`
-	OCSPFreshness       OCSPFreshnessSnapshot `json:"ocsp_freshness"`
-	Policy              PolicySnapshot        `json:"policy"`
-	EnabledProfiles     []RunProfileSnapshot  `json:"enabled_profiles"`
-	Network             NetworkSnapshot       `json:"network"`
-	Build               BuildIdentity         `json:"build"`
+	ProfileConfigDigest string                  `json:"profile_config_digest"`
+	PollIntervalNS      int64                   `json:"poll_interval_ns"`
+	MaxWaitNS           int64                   `json:"max_wait_ns"`
+	MaxAttempts         int                     `json:"max_attempts"`
+	PreflightMaxAgeNS   int64                   `json:"preflight_max_age_ns"`
+	StatusFreshness     StatusFreshnessSnapshot `json:"status_freshness"`
+	OCSPFreshness       OCSPFreshnessSnapshot   `json:"ocsp_freshness"`
+	CRLFreshness        CRLFreshnessSnapshot    `json:"crl_freshness"`
+	Policy              PolicySnapshot          `json:"policy"`
+	EnabledProfiles     []RunProfileSnapshot    `json:"enabled_profiles"`
+	Network             NetworkSnapshot         `json:"network"`
+	Build               BuildIdentity           `json:"build"`
 }
 
 // NetworkSnapshot binds non-secret endpoint and routing inputs that influence
@@ -40,9 +42,17 @@ type NetworkSnapshot struct {
 }
 
 type OCSPFreshnessSnapshot struct {
-	MaxClockSkewNS            int64 `json:"max_clock_skew_ns"`
 	RequireNextUpdate         bool  `json:"require_next_update"`
 	MaxAgeWithoutNextUpdateNS int64 `json:"max_age_without_next_update_ns"`
+}
+
+type StatusFreshnessSnapshot struct {
+	MaxClockSkewNS int64 `json:"max_clock_skew_ns"`
+}
+
+type CRLFreshnessSnapshot struct {
+	RequireNextUpdate bool  `json:"require_next_update"`
+	MaxAgeNS          int64 `json:"max_age_ns"`
 }
 
 type PolicySnapshot struct {
@@ -69,13 +79,15 @@ type BuildIdentity struct {
 }
 
 type profileConfigSnapshot struct {
-	PollIntervalNS    int64                 `json:"poll_interval_ns"`
-	MaxWaitNS         int64                 `json:"max_wait_ns"`
-	MaxAttempts       int                   `json:"max_attempts"`
-	PreflightMaxAgeNS int64                 `json:"preflight_max_age_ns"`
-	OCSPFreshness     OCSPFreshnessSnapshot `json:"ocsp_freshness"`
-	Policy            PolicySnapshot        `json:"policy"`
-	EnabledProfiles   []RunProfileSnapshot  `json:"enabled_profiles"`
+	PollIntervalNS    int64                   `json:"poll_interval_ns"`
+	MaxWaitNS         int64                   `json:"max_wait_ns"`
+	MaxAttempts       int                     `json:"max_attempts"`
+	PreflightMaxAgeNS int64                   `json:"preflight_max_age_ns"`
+	StatusFreshness   StatusFreshnessSnapshot `json:"status_freshness"`
+	OCSPFreshness     OCSPFreshnessSnapshot   `json:"ocsp_freshness"`
+	CRLFreshness      CRLFreshnessSnapshot    `json:"crl_freshness"`
+	Policy            PolicySnapshot          `json:"policy"`
+	EnabledProfiles   []RunProfileSnapshot    `json:"enabled_profiles"`
 }
 
 func (r *Runner) runConfigSnapshot() RunConfigSnapshot {
@@ -95,23 +107,24 @@ func (r *Runner) runConfigSnapshot() RunConfigSnapshot {
 		})
 	}
 	sort.Slice(enabled, func(i, j int) bool { return enabled[i].Name < enabled[j].Name })
-	freshness := OCSPFreshnessSnapshot{
-		MaxClockSkewNS:            int64(r.Config.OCSPFreshness.MaxClockSkew),
+	statusFreshness := StatusFreshnessSnapshot{MaxClockSkewNS: int64(r.Config.StatusFreshness.MaxClockSkew)}
+	ocspFreshness := OCSPFreshnessSnapshot{
 		RequireNextUpdate:         r.Config.OCSPFreshness.RequireNextUpdate,
 		MaxAgeWithoutNextUpdateNS: int64(r.Config.OCSPFreshness.MaxAgeWithoutNextUpdate),
 	}
+	crlFreshness := CRLFreshnessSnapshot{RequireNextUpdate: r.Config.CRLFreshness.RequireNextUpdate, MaxAgeNS: int64(r.Config.CRLFreshness.MaxAge)}
 	policy := PolicySnapshot{Enforce: r.Config.Policy.Enforce}
 	profileConfig := profileConfigSnapshot{
 		PollIntervalNS: int64(r.Config.PollInterval), MaxWaitNS: int64(r.Config.MaxWait),
 		MaxAttempts: r.Config.MaxAttempts, PreflightMaxAgeNS: int64(r.Config.PreflightMaxAge),
-		OCSPFreshness: freshness, Policy: policy, EnabledProfiles: enabled,
+		StatusFreshness: statusFreshness, OCSPFreshness: ocspFreshness, CRLFreshness: crlFreshness, Policy: policy, EnabledProfiles: enabled,
 	}
 	profileConfigDigest, _ := digestJSON(profileConfig)
 	return RunConfigSnapshot{
 		ProfileConfigDigest: profileConfigDigest,
 		PollIntervalNS:      int64(r.Config.PollInterval), MaxWaitNS: int64(r.Config.MaxWait),
 		MaxAttempts: r.Config.MaxAttempts, PreflightMaxAgeNS: int64(r.Config.PreflightMaxAge),
-		OCSPFreshness: freshness, Policy: policy, EnabledProfiles: enabled,
+		StatusFreshness: statusFreshness, OCSPFreshness: ocspFreshness, CRLFreshness: crlFreshness, Policy: policy, EnabledProfiles: enabled,
 		Network: NetworkSnapshot{IssuerEndpoint: r.IssuerEndpoint, OCSPEndpoint: r.OCSPURL, CRLEndpoint: r.CRLURL, PKIDomain: r.Domain, CanaryBindHost: r.CanaryBindHost, CanaryConnectHost: r.CanaryConnectHost},
 		Build:   currentBuildIdentity(),
 	}

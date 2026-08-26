@@ -3,6 +3,7 @@ package issuer
 import (
 	"bytes"
 	"context"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,6 +53,18 @@ func TestIssueRevoke(t *testing.T) {
 	}
 	if tResp.Before(tReq) {
 		t.Fatal("expected t_response >= t_request")
+	}
+}
+
+func TestVerifyIssuedSerialBindsVaultResponseToLeaf(t *testing.T) {
+	leaf := big.NewInt(0x1a2b)
+	if err := verifyIssuedSerial("1A:2B", leaf); err != nil {
+		t.Fatalf("equivalent Vault serial rejected: %v", err)
+	}
+	for _, serial := range []string{"", "not-hex", "1a2c"} {
+		if err := verifyIssuedSerial(serial, leaf); err == nil {
+			t.Fatalf("mismatched serial %q was accepted", serial)
+		}
 	}
 }
 

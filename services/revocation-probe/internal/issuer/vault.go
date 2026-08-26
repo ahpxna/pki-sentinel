@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -167,6 +168,9 @@ func (c *Client) IssueCanary(ctx context.Context, cn string) (*CanaryCert, error
 	if err != nil {
 		return nil, fmt.Errorf("issuer: parsing issuing CA certificate: %w", err)
 	}
+	if err := verifyIssuedSerial(serial, cert.SerialNumber); err != nil {
+		return nil, fmt.Errorf("issuer: inconsistent canary serial: %w", err)
+	}
 
 	chain := pemStrings(secret.Data["ca_chain"])
 	if len(chain) == 0 {
@@ -182,6 +186,28 @@ func (c *Client) IssueCanary(ctx context.Context, cn string) (*CanaryCert, error
 		Cert:         cert,
 		IssuerCert:   issuerCert,
 	}, nil
+}
+
+// verifyIssuedSerial binds the Vault API metadata to the exact DER leaf that
+// will be measured. Vault serials are commonly colon-delimited hexadecimal;
+// compare numerical values so harmless presentation differences cannot hide a
+// response that would revoke a different certificate.
+func verifyIssuedSerial(vaultSerial string, leafSerial *big.Int) error {
+	if leafSerial == nil {
+		return fmt.Errorf("parsed leaf has no serial number")
+	}
+	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(vaultSerial), ":", ""), "-", ""))
+	if normalized == "" {
+		return fmt.Errorf("Vault response has an empty serial number")
+	}
+	returned, ok := new(big.Int).SetString(normalized, 16)
+	if !ok || returned.Sign() < 0 {
+		return fmt.Errorf("Vault response serial %q is not hexadecimal", vaultSerial)
+	}
+	if returned.Cmp(leafSerial) != 0 {
+		return fmt.Errorf("Vault response serial %q does not match leaf serial %s", vaultSerial, leafSerial.Text(16))
+	}
+	return nil
 }
 
 func pemStrings(value interface{}) []string {

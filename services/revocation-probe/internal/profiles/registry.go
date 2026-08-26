@@ -292,12 +292,12 @@ func opensslOCSPDirect() Profile {
 			if parseErr != nil {
 				return withEvidence(observe(DecisionReject, ReasonInvalidStatus)), nil
 			}
-			if reason := checkOCSPFreshness(resp, time.Now(), target.OCSPFreshness); reason != "" {
+			if reason := checkOCSPFreshness(resp, time.Now(), target.StatusFreshness, target.OCSPFreshness); reason != "" {
 				metrics.OCSPResponderUp.Set(1)
 				return withEvidence(observe(DecisionReject, reason)), nil
 			}
 			if resp.Status == ocsp.Revoked {
-				if reason := checkRevocationTime(resp.RevokedAt, leaf.NotBefore, time.Now(), target.OCSPFreshness); reason != "" {
+				if reason := checkRevocationTime(resp.RevokedAt, leaf.NotBefore, time.Now(), target.StatusFreshness); reason != "" {
 					metrics.OCSPResponderUp.Set(1)
 					return withEvidence(observe(DecisionReject, reason)), nil
 				}
@@ -468,11 +468,11 @@ func goTLSOCSP() Profile {
 			if err != nil {
 				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonInvalidStatus), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
-			if reason := checkOCSPFreshness(resp, time.Now(), target.OCSPFreshness); reason != "" {
+			if reason := checkOCSPFreshness(resp, time.Now(), target.StatusFreshness, target.OCSPFreshness); reason != "" {
 				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, reason), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
 			if resp.Status == ocsp.Revoked {
-				if reason := checkRevocationTime(resp.RevokedAt, leaf.NotBefore, time.Now(), target.OCSPFreshness); reason != "" {
+				if reason := checkRevocationTime(resp.RevokedAt, leaf.NotBefore, time.Now(), target.StatusFreshness); reason != "" {
 					return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, reason), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 				}
 				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonRevoked), "stapled-ocsp.der", "application/ocsp-response", staple), nil
@@ -570,20 +570,14 @@ func crlCheck() Profile {
 				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonInvalidStatus)), nil
 			}
 			now := time.Now()
-			if crl.ThisUpdate.After(now.Add(5 * time.Minute)) {
-				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonFutureStatus)), nil
-			}
-			if crl.NextUpdate.IsZero() {
-				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonMissingFreshness)), nil
-			}
-			if now.After(crl.NextUpdate) {
-				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonStaleStatus)), nil
+			if reason := checkCRLFreshness(crl, now, target.StatusFreshness, target.CRLFreshness); reason != "" {
+				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, reason)), nil
 			}
 			metrics.CRLAgeSeconds.Set(now.Sub(crl.ThisUpdate).Seconds())
 			metrics.CRLEntries.Set(float64(len(crl.RevokedCertificateEntries)))
 			for _, entry := range crl.RevokedCertificateEntries {
 				if entry.SerialNumber.Cmp(leaf.SerialNumber) == 0 {
-					if reason := checkRevocationTime(entry.RevocationTime, leaf.NotBefore, now, target.OCSPFreshness); reason != "" {
+					if reason := checkRevocationTime(entry.RevocationTime, leaf.NotBefore, now, target.StatusFreshness); reason != "" {
 						return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, reason)), nil
 					}
 					return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonRevoked)), nil
@@ -599,9 +593,10 @@ func withBinaryEvidence(observation Observation, name, mediaType string, content
 	return observation
 }
 
-func checkOCSPFreshness(response *ocsp.Response, now time.Time, configured OCSPFreshnessPolicy) Reason {
-	policy := configured.WithDefaults()
-	if response.ThisUpdate.After(now.Add(policy.MaxClockSkew)) || response.ProducedAt.After(now.Add(policy.MaxClockSkew)) {
+func checkOCSPFreshness(response *ocsp.Response, now time.Time, configuredStatus StatusFreshnessPolicy, configuredOCSP OCSPFreshnessPolicy) Reason {
+	status := configuredStatus.WithDefaults()
+	policy := configuredOCSP.WithDefaults()
+	if response.ThisUpdate.After(now.Add(status.MaxClockSkew)) || response.ProducedAt.After(now.Add(status.MaxClockSkew)) {
 		return ReasonFutureStatus
 	}
 	if response.NextUpdate.IsZero() {
@@ -619,9 +614,30 @@ func checkOCSPFreshness(response *ocsp.Response, now time.Time, configured OCSPF
 	return ""
 }
 
+func checkCRLFreshness(crl *x509.RevocationList, now time.Time, configuredStatus StatusFreshnessPolicy, configuredCRL CRLFreshnessPolicy) Reason {
+	status := configuredStatus.WithDefaults()
+	policy := configuredCRL.WithDefaults()
+	if crl.ThisUpdate.After(now.Add(status.MaxClockSkew)) {
+		return ReasonFutureStatus
+	}
+	if crl.NextUpdate.IsZero() {
+		if policy.RequireNextUpdate {
+			return ReasonMissingFreshness
+		}
+		if now.Sub(crl.ThisUpdate) > policy.MaxAge {
+			return ReasonStaleStatus
+		}
+		return ""
+	}
+	if now.After(crl.NextUpdate) {
+		return ReasonStaleStatus
+	}
+	return ""
+}
+
 // checkRevocationTime ensures a revoked status is not asserted before the
 // asserted revocation time and that it is plausible for the leaf certificate.
-func checkRevocationTime(revokedAt, notBefore, now time.Time, configured OCSPFreshnessPolicy) Reason {
+func checkRevocationTime(revokedAt, notBefore, now time.Time, configured StatusFreshnessPolicy) Reason {
 	policy := configured.WithDefaults()
 	if revokedAt.IsZero() || revokedAt.Before(notBefore.Add(-policy.MaxClockSkew)) {
 		return ReasonInvalidStatus

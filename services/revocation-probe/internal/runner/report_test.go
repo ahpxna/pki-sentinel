@@ -47,8 +47,10 @@ func TestNilCycleReportCanonicalJSONFails(t *testing.T) {
 func TestRunConfigDigestBindsEffectiveExecutionInputs(t *testing.T) {
 	r := &Runner{Config: &config.Config{
 		PollInterval: time.Second, MaxWait: 10 * time.Second, MaxAttempts: 5, PreflightMaxAge: 2 * time.Second,
-		OCSPFreshness: config.OCSPFreshnessConfig{MaxClockSkew: time.Minute, RequireNextUpdate: true, MaxAgeWithoutNextUpdate: time.Hour},
-		Profiles:      []config.ProfileConfig{{Name: "client", Enabled: true, Timeout: 3 * time.Second}},
+		StatusFreshness: config.StatusFreshnessConfig{MaxClockSkew: time.Minute},
+		OCSPFreshness:   config.OCSPFreshnessConfig{RequireNextUpdate: true, MaxAgeWithoutNextUpdate: time.Hour},
+		CRLFreshness:    config.CRLFreshnessConfig{RequireNextUpdate: true, MaxAge: time.Hour},
+		Profiles:        []config.ProfileConfig{{Name: "client", Enabled: true, Timeout: 3 * time.Second}},
 	}, Profiles: []profiles.Profile{{Name: "client", Role: profiles.RoleClientExecutor, Method: profiles.MethodOCSPStapled}}}
 	first := r.runConfigSnapshot()
 	if first.ProfileConfigDigest == "" {
@@ -81,5 +83,13 @@ func TestRunConfigDigestBindsEffectiveExecutionInputs(t *testing.T) {
 	}
 	if executorDigest == firstDigest {
 		t.Fatal("run config digest did not change when executor mapping changed")
+	}
+	r.Config.StatusFreshness.MaxClockSkew = 30 * time.Second
+	crlFreshnessDigest, err := digestRunConfig(r.runConfigSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if crlFreshnessDigest == executorDigest {
+		t.Fatal("run config digest did not change when status freshness changed")
 	}
 }

@@ -148,15 +148,15 @@ func TestLoadRejectsNonPositivePreflightMaxAge(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsNegativeOCSPFreshnessDurations(t *testing.T) {
+func TestLoadRejectsNegativeFreshnessDurations(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "profiles.yaml")
-	content := "ocsp_freshness:\n  max_clock_skew: -1s\nprofiles:\n  - name: curl-default\n    enabled: true\n    timeout: 5s\n"
+	content := "status_freshness:\n  max_clock_skew: -1s\nprofiles:\n  - name: curl-default\n    enabled: true\n    timeout: 5s\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(path); err == nil {
-		t.Fatal("expected negative max_clock_skew to be rejected")
+		t.Fatal("expected negative freshness duration to be rejected")
 	}
 }
 

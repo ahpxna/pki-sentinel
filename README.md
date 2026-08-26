@@ -211,7 +211,7 @@ convenience. None of them are hidden — see also `SECURITY.md` and
 | Demo shortcut | Risk | Production fix |
 |---|---|---|
 | Root CA online in Vault | root key compromise = total trust failure | offline root on HSM/smartcard; sign the intermediate manually, annually |
-| Transit auto-unseal via a second dev-mode Vault | seal Vault compromise unseals everything | AWS KMS / GCP KMS / Azure Key Vault / HSM; the seal service has no host-published API port |
+| Transit auto-unseal via a second persistent local Vault | seal Vault compromise unseals everything; loss of `.data/vault-seal` prevents recovery | AWS KMS / GCP KMS / Azure Key Vault / HSM; the seal service has no host-published API port |
 | Vault listener `tls_disable = true` | plaintext on the Docker bridge | TLS on the listener with a bootstrap cert |
 | Full CRL uses immediate rebuild (`auto_rebuild=false`) | expensive at high revocation volume; does not model periodic/delta CRL delivery | enable auto-rebuild/delta in production and model publication delay as an explicit assurance scenario |
 | Recovery keys in `.data/vault-init.json` | plaintext key material on disk | PGP-encrypted shares distributed to separate key holders |

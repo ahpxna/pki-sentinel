@@ -21,23 +21,22 @@ that must run unattended in CI and on a developer's laptop alike.
 
 1. **Shamir unseal keys, manually supplied.** Rejected: blocks automated
    bootstrap and CI.
-2. **Transit auto-unseal against a second, dev-mode Vault (`vault-seal`).**
+2. **Transit auto-unseal against a second, persistent local Vault (`vault-seal`).**
    Chosen for this repository.
 3. **Cloud KMS auto-unseal (AWS/GCP/Azure) or HSM.** Suitable for production,
    but dependent on cloud credentials unavailable to a self-contained demo.
 
 ## Decision Outcome
 
-Use a second Vault container (`vault-seal`) running in dev mode purely to
+Use a second Vault container (`vault-seal`) with persistent Raft storage to
 host a `transit` engine and an `autounseal` key. The primary `vault`
 container's `seal "transit"` stanza points at it. This gives real transit
 auto-unseal mechanics (recovery keys instead of unseal keys, automatic
 unseal on restart) without requiring cloud credentials.
 
-**This is a development substitute, not a production pattern.** `vault-seal`
-runs in-memory development mode: an actor with container access has the
-autounseal key, and its own audit trail does not exist. In production this
-container is replaced by a cloud KMS or a hardware security module. The
+**This remains a development substitute, not a production pattern.** An actor
+with container access has the local seal token and key material. In production
+this container is replaced by a cloud KMS or a hardware security module. The
 `seal` stanza retains the same purpose with provider-specific configuration.
 
 The transit seal client authenticates via `VAULT_TOKEN`, but that value is now
@@ -48,7 +47,7 @@ Vault startup wrapper reads it from an ignored, read-only bind mount; the
 and its initializer.
 
 The seal service has no host-published listener. Bootstrap administration uses
-`docker compose exec` on the internal network rather than exposing the dev-mode
+`docker compose exec` on the internal network rather than exposing the local
 Vault API on a host TCP port.
 
 ## Consequences
@@ -62,5 +61,6 @@ Vault API on a host TCP port.
   `SECURITY.md` and the
   README's "Production notes" table, with the production fix (cloud
   KMS/HSM) stated explicitly.
-- If `vault-seal` is unreachable, `vault` cannot unseal after a restart —
+- If `vault-seal` or its persistent volume is unavailable, `vault` cannot
+  unseal after a restart —
   documented in Appendix C of the master plan / `docs/runbooks/vault-seal-recovery.md`.

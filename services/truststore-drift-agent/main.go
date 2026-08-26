@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,6 +21,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -200,9 +202,20 @@ func cmdCheck(args []string) {
 		fmt.Fprintf(os.Stderr, "check: %s\n", result.Error)
 		os.Exit(2)
 	}
-	if result.UnknownRoots > 0 || result.MissingRoots > 0 || result.ExpiredRoots > 0 {
-		os.Exit(1)
+	if checkExitCode(result) != 0 {
+		os.Exit(checkExitCode(result))
 	}
+}
+
+// checkExitCode defines the check command's contract: every detected drift
+// class, including a root whose certificate or policy changed in place, is a
+// non-zero policy result. Invalid input/scans remain operational failures
+// (exit 2) and are handled by cmdCheck before this function is called.
+func checkExitCode(result ScanResult) int {
+	if result.UnknownRoots > 0 || result.MissingRoots > 0 || result.ChangedRoots > 0 || result.ExpiredRoots > 0 {
+		return 1
+	}
+	return 0
 }
 
 func loadVerifiedBaseline(baselinePath, publicKeyPath, statePath string) (Baseline, error) {
@@ -211,8 +224,8 @@ func loadVerifiedBaseline(baselinePath, publicKeyPath, statePath string) (Baseli
 	if err != nil {
 		return Baseline{}, fmt.Errorf("reading baseline: %w", err)
 	}
-	var baseline Baseline
-	if err := json.Unmarshal(data, &baseline); err != nil {
+	baseline, err := parseStrictBaseline(data)
+	if err != nil {
 		return Baseline{}, fmt.Errorf("parsing baseline: %w", err)
 	}
 	publicKey, err := loadPublicKey(publicKeyPath)
@@ -232,6 +245,107 @@ func loadVerifiedBaseline(baselinePath, publicKeyPath, statePath string) (Baseli
 		return Baseline{}, err
 	}
 	return baseline, nil
+}
+
+// parseStrictBaseline rejects fields the current agent does not understand,
+// duplicate object keys, and a second top-level JSON value. This preserves the
+// meaning of a signed baseline across parser upgrades instead of silently
+// discarding unsigned or ambiguous input.
+func parseStrictBaseline(data []byte) (Baseline, error) {
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return Baseline{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var baseline Baseline
+	if err := decoder.Decode(&baseline); err != nil {
+		return Baseline{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return Baseline{}, fmt.Errorf("multiple JSON documents are not allowed")
+		}
+		return Baseline{}, err
+	}
+	seenSPKI := make(map[string]struct{}, len(baseline.Roots))
+	seenSubject := make(map[string]struct{}, len(baseline.Roots))
+	for _, root := range baseline.Roots {
+		if root.SPKIHash == "" {
+			return Baseline{}, fmt.Errorf("baseline root has an empty SPKI hash")
+		}
+		if _, duplicate := seenSPKI[root.SPKIHash]; duplicate {
+			return Baseline{}, fmt.Errorf("baseline contains duplicate SPKI hash %q", root.SPKIHash)
+		}
+		seenSPKI[root.SPKIHash] = struct{}{}
+		if root.Subject == "" {
+			return Baseline{}, fmt.Errorf("baseline root has an empty subject")
+		}
+		if _, duplicate := seenSubject[root.Subject]; duplicate {
+			return Baseline{}, fmt.Errorf("baseline contains duplicate subject %q", root.Subject)
+		}
+		seenSubject[root.Subject] = struct{}{}
+	}
+	return baseline, nil
+}
+
+func rejectDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := consumeJSONValue(decoder); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON documents are not allowed")
+		}
+		return err
+	}
+	return nil
+}
+
+func consumeJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]struct{}{}
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("JSON object key is not a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("duplicate JSON object key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := consumeJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+		return err
+	case '[':
+		for decoder.More() {
+			if err := consumeJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+		return err
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
 }
 
 func scanTrustStore(baselinePath, publicKeyPath, statePath, extraCADir string, now time.Time) ScanResult {

@@ -6,10 +6,16 @@ max_wait: 180s
 max_attempts: 90
 preflight_max_age: 2s
 
-ocsp_freshness:
+status_freshness:
   max_clock_skew: 5m
+
+ocsp_freshness:
   require_next_update: true
   max_age_without_next_update: 1h
+
+crl_freshness:
+  require_next_update: true
+  max_age: 1h
 
 # Baseline conformance records normal implementation behavior. Set true only
 # where every enabled profile must also satisfy the rejection policy.

@@ -78,26 +78,49 @@ type Target struct {
 	CertificateSerial string
 	IssuedLeafSHA256  string // hex SHA-256 of the exact issued leaf DER
 	Scenario          Scenario
+	StatusFreshness   StatusFreshnessPolicy
 	OCSPFreshness     OCSPFreshnessPolicy
+	CRLFreshness      CRLFreshnessPolicy
 	// ProbeTimeout is assigned by the controller for each attempt and is
 	// enforced unchanged by remote executors.
 	ProbeTimeout time.Duration `json:"probe_timeout_ns"`
 }
 
-// OCSPFreshnessPolicy makes the temporal acceptance rules explicit rather
-// than relying on a parser's cryptographic validation alone.
+// StatusFreshnessPolicy defines temporal assumptions shared by OCSP and CRL.
+type StatusFreshnessPolicy struct {
+	MaxClockSkew time.Duration
+}
+
+func (p StatusFreshnessPolicy) WithDefaults() StatusFreshnessPolicy {
+	if p.MaxClockSkew <= 0 {
+		p.MaxClockSkew = 5 * time.Minute
+	}
+	return p
+}
+
+// OCSPFreshnessPolicy makes OCSP-specific temporal acceptance rules explicit
+// rather than relying on a parser's cryptographic validation alone.
 type OCSPFreshnessPolicy struct {
-	MaxClockSkew            time.Duration
 	RequireNextUpdate       bool
 	MaxAgeWithoutNextUpdate time.Duration
 }
 
 func (p OCSPFreshnessPolicy) WithDefaults() OCSPFreshnessPolicy {
-	if p.MaxClockSkew <= 0 {
-		p.MaxClockSkew = 5 * time.Minute
-	}
 	if p.MaxAgeWithoutNextUpdate <= 0 {
 		p.MaxAgeWithoutNextUpdate = time.Hour
+	}
+	return p
+}
+
+// CRLFreshnessPolicy makes CRL-specific temporal acceptance rules explicit.
+type CRLFreshnessPolicy struct {
+	RequireNextUpdate bool
+	MaxAge            time.Duration
+}
+
+func (p CRLFreshnessPolicy) WithDefaults() CRLFreshnessPolicy {
+	if p.MaxAge <= 0 {
+		p.MaxAge = time.Hour
 	}
 	return p
 }

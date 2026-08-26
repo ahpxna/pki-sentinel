@@ -196,6 +196,30 @@ func TestEvaluateTrustStoreDetectsAllDriftClasses(t *testing.T) {
 	}
 }
 
+func TestCheckExitCodeFailsOnChangedRoots(t *testing.T) {
+	if got := checkExitCode(ScanResult{ChangedRoots: 1}); got != 1 {
+		t.Fatalf("changed root check exit code=%d, want 1", got)
+	}
+	if got := checkExitCode(ScanResult{}); got != 0 {
+		t.Fatalf("clean check exit code=%d, want 0", got)
+	}
+}
+
+func TestParseStrictBaselineRejectsAmbiguousOrUnknownJSON(t *testing.T) {
+	for name, contents := range map[string]string{
+		"unknown field":   `{"generated_at":"2026-01-01T00:00:00Z","roots":[],"signature":"x","future_policy":"ignore"}`,
+		"duplicate key":   `{"generated_at":"2026-01-01T00:00:00Z","generated_at":"2026-01-02T00:00:00Z","roots":[],"signature":"x"}`,
+		"second document": `{"generated_at":"2026-01-01T00:00:00Z","roots":[],"signature":"x"} {}`,
+		"duplicate SPKI":  `{"generated_at":"2026-01-01T00:00:00Z","roots":[{"subject":"A","spki_sha256":"same"},{"subject":"B","spki_sha256":"same"}],"signature":"x"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseStrictBaseline([]byte(contents)); err == nil {
+				t.Fatal("ambiguous baseline was accepted")
+			}
+		})
+	}
+}
+
 func TestPrometheusTextContainsBoundedMetrics(t *testing.T) {
 	text := prometheusText(ScanResult{
 		UnknownRoots: 2, MissingRoots: 1, BaselineValid: true, ScanSuccess: true,

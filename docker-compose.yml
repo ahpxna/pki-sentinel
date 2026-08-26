@@ -74,18 +74,46 @@ services:
       - ./.data/attestation:/attestation
     restart: "no"
 
-  # Demo stand-in for a cloud KMS. Holds a transit key used to auto-unseal the
-  # primary Vault. In production this would be AWS/GCP/Azure KMS or an HSM —
-  # see docs/adr/0002-auto-unseal-tradeoffs.md.
+  # Persistent local KMS surrogate. The Raft volume preserves the transit key
+  # across restarts; production deployments should use a managed KMS or HSM.
   vault-seal:
     image: ${VAULT_IMAGE}
     container_name: pki-vault-seal
     cap_add: ["IPC_LOCK"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mkdir -p /vault/seal/config /vault/seal/data
+        cat > /vault/seal/config/vault.hcl <<'HCL'
+        ui = false
+        disable_mlock = true
+        storage "raft" {
+          path = "/vault/seal/data"
+          node_id = "vault-seal-1"
+        }
+        listener "tcp" {
+          address = "0.0.0.0:8200"
+          tls_disable = true
+        }
+        api_addr = "http://vault-seal:8200"
+        cluster_addr = "http://vault-seal:8201"
+        HCL
+        /usr/local/bin/docker-entrypoint.sh vault server -config=/vault/seal/config/vault.hcl &
+        pid=$$!
+        trap 'kill "$$pid" 2>/dev/null || true; wait "$$pid" 2>/dev/null || true' EXIT TERM INT
+        for i in $(seq 1 60); do
+          if vault status >/dev/null 2>&1; then break; fi
+          sleep 1
+        done
+        if vault status 2>&1 | grep -qi 'initialized.*false'; then
+          vault operator init -root-token-id="${VAULT_SEAL_TOKEN}" -recovery-shares=1 -recovery-threshold=1 >/dev/null
+        fi
+        wait "$$pid"
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_SEAL_TOKEN}
-      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
       VAULT_ADDR: http://127.0.0.1:8200
     networks: [pki-sentinel]
+    volumes:
+      - ./.data/vault-seal:/vault/seal
     healthcheck:
       test: ["CMD", "vault", "status"]
       interval: 5s
@@ -261,7 +289,7 @@ services:
         required: false
     ports: ["${HOST_BIND_ADDRESS:-127.0.0.1}:${PROBE_METRICS_PORT}:9110"]
     volumes:
-      - ./docs/benchmarks/data:/etc/pki-sentinel/docs/benchmarks/data
+      - ./docs/benchmarks/data:/etc/pki-sentinel/docs/benchmarks/data:ro
       - ./.data/attestation:/run/attestation
       - ./.data/evidence:/var/lib/pki-sentinel/evidence
     restart: unless-stopped

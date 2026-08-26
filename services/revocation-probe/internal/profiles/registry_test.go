@@ -91,17 +91,18 @@ func TestExpectationMatchesDecisionAndReason(t *testing.T) {
 
 func TestCheckOCSPFreshness(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
-	policy := OCSPFreshnessPolicy{MaxClockSkew: 5 * time.Minute, RequireNextUpdate: true, MaxAgeWithoutNextUpdate: time.Hour}
-	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(-time.Minute), ProducedAt: now.Add(-time.Minute), NextUpdate: now.Add(time.Minute)}, now, policy); got != "" {
+	status := StatusFreshnessPolicy{MaxClockSkew: 5 * time.Minute}
+	policy := OCSPFreshnessPolicy{RequireNextUpdate: true, MaxAgeWithoutNextUpdate: time.Hour}
+	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(-time.Minute), ProducedAt: now.Add(-time.Minute), NextUpdate: now.Add(time.Minute)}, now, status, policy); got != "" {
 		t.Fatalf("fresh response classified %s", got)
 	}
-	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(6 * time.Minute), NextUpdate: now.Add(time.Hour)}, now, policy); got != ReasonFutureStatus {
+	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(6 * time.Minute), NextUpdate: now.Add(time.Hour)}, now, status, policy); got != ReasonFutureStatus {
 		t.Fatalf("future response classified %s", got)
 	}
-	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(-time.Minute)}, now, policy); got != ReasonMissingFreshness {
+	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(-time.Minute)}, now, status, policy); got != ReasonMissingFreshness {
 		t.Fatalf("unbounded response classified %s", got)
 	}
-	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(-time.Hour), NextUpdate: now.Add(-time.Minute)}, now, policy); got != ReasonStaleStatus {
+	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(-time.Hour), NextUpdate: now.Add(-time.Minute)}, now, status, policy); got != ReasonStaleStatus {
 		t.Fatalf("expired response classified %s", got)
 	}
 }
@@ -109,7 +110,7 @@ func TestCheckOCSPFreshness(t *testing.T) {
 func TestCheckRevocationTimeRejectsFutureAndImpossibleValues(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	notBefore := now.Add(-time.Hour)
-	policy := OCSPFreshnessPolicy{MaxClockSkew: 5 * time.Minute}
+	policy := StatusFreshnessPolicy{MaxClockSkew: 5 * time.Minute}
 	if got := checkRevocationTime(now.Add(-time.Minute), notBefore, now, policy); got != "" {
 		t.Fatalf("valid revocation time classified %s", got)
 	}
@@ -121,6 +122,14 @@ func TestCheckRevocationTimeRejectsFutureAndImpossibleValues(t *testing.T) {
 	}
 	if got := checkRevocationTime(notBefore.Add(-6*time.Minute), notBefore, now, policy); got != ReasonInvalidStatus {
 		t.Fatalf("pre-certificate revocation time classified %s", got)
+	}
+}
+
+func TestCheckCRLFreshnessUsesConfiguredClockSkew(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	crl := &x509.RevocationList{ThisUpdate: now.Add(31 * time.Second), NextUpdate: now.Add(time.Hour)}
+	if got := checkCRLFreshness(crl, now, StatusFreshnessPolicy{MaxClockSkew: 30 * time.Second}, CRLFreshnessPolicy{RequireNextUpdate: true, MaxAge: time.Hour}); got != ReasonFutureStatus {
+		t.Fatalf("configured CRL clock skew was ignored: got %s", got)
 	}
 }
 

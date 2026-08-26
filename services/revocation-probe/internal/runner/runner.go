@@ -274,10 +274,16 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 		CertificateSerial: cert.SerialNumber,
 		IssuedLeafSHA256:  report.IssuedLeafSHA256,
 		Scenario:          scenario,
+		StatusFreshness: profiles.StatusFreshnessPolicy{
+			MaxClockSkew: r.Config.StatusFreshness.MaxClockSkew,
+		},
 		OCSPFreshness: profiles.OCSPFreshnessPolicy{
-			MaxClockSkew:            r.Config.OCSPFreshness.MaxClockSkew,
 			RequireNextUpdate:       r.Config.OCSPFreshness.RequireNextUpdate,
 			MaxAgeWithoutNextUpdate: r.Config.OCSPFreshness.MaxAgeWithoutNextUpdate,
+		},
+		CRLFreshness: profiles.CRLFreshnessPolicy{
+			RequireNextUpdate: r.Config.CRLFreshness.RequireNextUpdate,
+			MaxAge:            r.Config.CRLFreshness.MaxAge,
 		},
 	}
 
