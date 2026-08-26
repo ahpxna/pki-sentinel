@@ -104,7 +104,9 @@ services:
         for i in $(seq 1 60); do
           status="$$(vault status 2>&1 || true)"
           if echo "$$status" | grep -qi 'initialized.*false'; then
-            vault operator init -root-token-id="${VAULT_SEAL_TOKEN}" -recovery-shares=1 -recovery-threshold=1 >/dev/null
+            vault operator init -recovery-shares=1 -recovery-threshold=1 -format=json > /vault/seal/init.json
+            sed -n 's/.*"root_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /vault/seal/init.json > /vault/seal/root-token
+            chmod 0600 /vault/seal/init.json /vault/seal/root-token
             break
           fi
           if echo "$$status" | grep -qi 'initialized.*true'; then break; fi
@@ -148,10 +150,14 @@ services:
     networks: [pki-sentinel]
     environment:
       VAULT_ADDR: http://vault-seal:8200
-      VAULT_TOKEN: ${VAULT_SEAL_TOKEN}
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
+        if [ ! -s /run/vault-seal/root-token ]; then
+          echo "vault-seal root token is missing; persistent seal state cannot be administered" >&2
+          exit 1
+        fi
+        export VAULT_TOKEN="$$(cat /run/vault-seal/root-token)"
         vault secrets enable transit >/dev/null 2>&1 || true
         vault write -f transit/keys/autounseal >/dev/null
         vault policy write pki-sentinel-autounseal - <<'POLICY'
