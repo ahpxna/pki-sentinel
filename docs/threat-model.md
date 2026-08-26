@@ -12,8 +12,8 @@ table and the README's "Production notes" — read all three together.
 | Vault audit log tampered with to hide a revocation | Repudiation | The file audit device records structured events. Production requires shipping them to a separately administered log store; the optional Wazuh assets in this repository do not yet prove that path end to end. |
 | Attacker enumerates issued certs / secrets via Vault API | Information Disclosure | Least-privilege policies per service (`demo-api`, `revocation-probe`, `traefik-acme`), each scoped to only the paths it needs. |
 | AppRole SecretID stolen | Spoofing | Policies are scoped per service. Static non-expiring SecretIDs are a Compose-demo limitation; production requires workload identity or response-wrapped rotation. |
-| Compromised application AppRole token used to escalate | Elevation of Privilege | Application policies do not grant `sudo`. Terraform uses a separate bootstrap policy with `sudo` only on repository-owned mount/auth/audit administration paths. |
-| Primary Vault process compromised and its transit credential exfiltrated | Elevation of Privilege | The primary receives an orphan periodic token restricted to `transit/encrypt/autounseal` and `transit/decrypt/autounseal`; the seal-Vault development root token is never mounted or injected into the primary. |
+| Compromised Terraform AppRole token used to escalate | Elevation of Privilege | The persistent Terraform policy manages only named PKI/KV paths. A separate short-lived bootstrap-admin token performs mount, auth, audit, policy, and AppRole administration. |
+| Primary Vault process compromised and its transit credential exfiltrated | Elevation of Privilege | The primary receives a periodic token restricted to `transit/encrypt/autounseal` and `transit/decrypt/autounseal`; its mount contains no seal-Vault root token, Shamir key, init document, or Raft data. |
 
 ## Assurance plane (revocation-probe, truststore-drift-agent)
 

@@ -169,6 +169,7 @@ func testCertificate(t *testing.T, commonName string, notAfter time.Time) *x509.
 	return &x509.Certificate{
 		Subject:                 pkix.Name{CommonName: commonName},
 		RawSubjectPublicKeyInfo: spki,
+		Raw:                     append([]byte(commonName+":"), spki...),
 		NotAfter:                notAfter,
 	}
 }
@@ -207,16 +208,47 @@ func TestCheckExitCodeFailsOnChangedRoots(t *testing.T) {
 
 func TestParseStrictBaselineRejectsAmbiguousOrUnknownJSON(t *testing.T) {
 	for name, contents := range map[string]string{
-		"unknown field":   `{"generated_at":"2026-01-01T00:00:00Z","roots":[],"signature":"x","future_policy":"ignore"}`,
-		"duplicate key":   `{"generated_at":"2026-01-01T00:00:00Z","generated_at":"2026-01-02T00:00:00Z","roots":[],"signature":"x"}`,
-		"second document": `{"generated_at":"2026-01-01T00:00:00Z","roots":[],"signature":"x"} {}`,
-		"duplicate SPKI":  `{"generated_at":"2026-01-01T00:00:00Z","roots":[{"subject":"A","spki_sha256":"same"},{"subject":"B","spki_sha256":"same"}],"signature":"x"}`,
+		"unknown field":         `{"generated_at":"2026-01-01T00:00:00Z","roots":[],"signature":"x","future_policy":"ignore"}`,
+		"duplicate key":         `{"generated_at":"2026-01-01T00:00:00Z","generated_at":"2026-01-02T00:00:00Z","roots":[],"signature":"x"}`,
+		"second document":       `{"generated_at":"2026-01-01T00:00:00Z","roots":[],"signature":"x"} {}`,
+		"duplicate certificate": `{"generated_at":"2026-01-01T00:00:00Z","roots":[{"subject":"A","spki_sha256":"one","cert_sha256":"same"},{"subject":"B","spki_sha256":"two","cert_sha256":"same"}],"signature":"x"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseStrictBaseline([]byte(contents)); err == nil {
 				t.Fatal("ambiguous baseline was accepted")
 			}
 		})
+	}
+}
+
+func TestBaselinePermitsSharedSubjectOrSPKIWhenCertificatesDiffer(t *testing.T) {
+	baseline := Baseline{Roots: []RootEntry{
+		{Subject: "CN=Shared", SPKIHash: "shared-key", CertHash: "certificate-a"},
+		{Subject: "CN=Shared", SPKIHash: "shared-key", CertHash: "certificate-b"},
+	}}
+	if err := validateBaseline(baseline); err != nil {
+		t.Fatalf("valid distinct certificates rejected: %v", err)
+	}
+}
+
+func TestSameSPKICertificateChangeIsNotDeduplicatedAway(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certA := &x509.Certificate{Subject: pkix.Name{CommonName: "Shared key"}, RawSubjectPublicKeyInfo: spki, Raw: []byte("certificate-a"), NotAfter: now.Add(time.Hour)}
+	certB := &x509.Certificate{Subject: pkix.Name{CommonName: "Shared key"}, RawSubjectPublicKeyInfo: spki, Raw: []byte("certificate-b"), NotAfter: now.Add(time.Hour)}
+	if got := deduplicateCertificates([]*x509.Certificate{certA, certB, certA}); len(got) != 2 {
+		t.Fatalf("deduplicated distinct same-SPKI certificates: got %d, want 2", len(got))
+	}
+	result := evaluateTrustStore(Baseline{Roots: []RootEntry{rootEntry(certA)}}, []*x509.Certificate{certB}, now)
+	if result.ChangedRoots != 1 || result.UnknownRoots != 0 || result.MissingRoots != 0 {
+		t.Fatalf("same-SPKI certificate change was not classified as drift: %+v", result)
 	}
 }
 

@@ -42,9 +42,10 @@ this container is replaced by a cloud KMS or a hardware security module. The
 The transit seal client authenticates via `VAULT_TOKEN`, but that value is now
 a dedicated orphan periodic token whose policy permits only
 `transit/encrypt/autounseal` and `transit/decrypt/autounseal`. The primary
-Vault startup wrapper reads it from an ignored, read-only bind mount; the
-`VAULT_SEAL_TOKEN` development root token remains confined to `vault-seal`
-and its initializer.
+Vault startup wrapper reads it from a dedicated ignored, read-only runtime
+directory. The seal Vault root token, Shamir key, init document, and Raft data
+remain in a separate administration store that is never mounted into primary
+Vault.
 
 The seal service has no host-published listener. Bootstrap administration uses
 `docker compose exec` on the internal network rather than exposing the local

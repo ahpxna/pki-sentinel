@@ -620,12 +620,16 @@ func checkCRLFreshness(crl *x509.RevocationList, now time.Time, configuredStatus
 	if crl.ThisUpdate.After(now.Add(status.MaxClockSkew)) {
 		return ReasonFutureStatus
 	}
+	// MaxAge bounds the age of every CRL, including one that carries a
+	// syntactically valid future NextUpdate. NextUpdate is an issuer-provided
+	// validity limit, not evidence that an arbitrarily old CRL is fresh enough
+	// for this experiment's signed policy.
+	if now.Sub(crl.ThisUpdate) > policy.MaxAge {
+		return ReasonStaleStatus
+	}
 	if crl.NextUpdate.IsZero() {
 		if policy.RequireNextUpdate {
 			return ReasonMissingFreshness
-		}
-		if now.Sub(crl.ThisUpdate) > policy.MaxAge {
-			return ReasonStaleStatus
 		}
 		return ""
 	}

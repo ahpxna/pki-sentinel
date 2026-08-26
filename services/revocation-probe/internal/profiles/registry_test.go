@@ -133,6 +133,14 @@ func TestCheckCRLFreshnessUsesConfiguredClockSkew(t *testing.T) {
 	}
 }
 
+func TestCheckCRLFreshnessEnforcesMaxAgeWithNextUpdate(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	crl := &x509.RevocationList{ThisUpdate: now.Add(-2 * time.Hour), NextUpdate: now.Add(time.Hour)}
+	if got := checkCRLFreshness(crl, now, StatusFreshnessPolicy{MaxClockSkew: time.Minute}, CRLFreshnessPolicy{RequireNextUpdate: true, MaxAge: time.Hour}); got != ReasonStaleStatus {
+		t.Fatalf("old CRL with future NextUpdate classified %s, want %s", got, ReasonStaleStatus)
+	}
+}
+
 func TestVerifyPresentedLeafBindsExactIssuedCertificate(t *testing.T) {
 	leaf := &x509.Certificate{Raw: []byte("issued-leaf-der")}
 	sum := sha256.Sum256(leaf.Raw)

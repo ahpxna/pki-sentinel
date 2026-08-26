@@ -1,11 +1,10 @@
-# vault-seal runs in dev mode (see docker-compose.yml VAULT_DEV_* env vars),
-# so this file is currently unused but kept for parity if vault-seal is later
-# switched to production (non-dev) mode.
-ui = true
+# Reference configuration for the persistent local seal Vault. Compose writes
+# the equivalent configuration into its protected administration volume.
+ui = false
 disable_mlock = true
 
 storage "raft" {
-  path    = "/vault/data"
+  path    = "/vault/seal/data"
   node_id = "vault-seal-1"
 }
 

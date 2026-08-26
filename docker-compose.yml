@@ -140,16 +140,31 @@ services:
       start_period: 5s
 
   # Linux bind mounts are created as root. Vault runs as UID 100/GID 1000, so
-  # normalize the persistent seal volume before the server opens vault.db.
+  # normalize every seal-administration path before it writes its Raft state,
+  # generated configuration, root token, and Shamir recovery material.
   vault-seal-storage-init:
     image: ${VAULT_IMAGE}
     container_name: pki-vault-seal-storage-init
     user: "0:0"
     network_mode: none
     entrypoint: ["/bin/sh", "-ec"]
-    command: ["mkdir -p /vault/seal/config /vault/seal/data && chown -R 100:1000 /vault/seal/data && chmod 0700 /vault/seal/data"]
+    command: ["mkdir -p /vault/seal/config /vault/seal/data && chown -R 100:1000 /vault/seal && chmod 0700 /vault/seal /vault/seal/config /vault/seal/data"]
     volumes:
       - ./.data/vault-seal:/vault/seal
+    restart: "no"
+
+  # The primary Vault receives only this dedicated runtime directory. It never
+  # receives the seal Vault's Raft data, root token, init document, or Shamir
+  # unseal key.
+  vault-seal-runtime-init:
+    image: ${VAULT_IMAGE}
+    container_name: pki-vault-seal-runtime-init
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["mkdir -p /vault/seal-runtime && chown -R 100:1000 /vault/seal-runtime && chmod 0700 /vault/seal-runtime"]
+    volumes:
+      - ./.data/vault-seal-runtime:/vault/seal-runtime
     restart: "no"
 
   # One-shot dependency gate: the primary Vault cannot even parse its transit
@@ -164,13 +179,17 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        if [ ! -s /run/vault-seal/root-token ]; then
+        if [ ! -s /run/vault-seal-admin/root-token ]; then
           echo "vault-seal root token is missing; persistent seal state cannot be administered" >&2
           exit 1
         fi
-        export VAULT_TOKEN="$$(cat /run/vault-seal/root-token)"
-        vault secrets enable transit >/dev/null 2>&1 || true
-        vault write -f transit/keys/autounseal >/dev/null
+        export VAULT_TOKEN="$$(cat /run/vault-seal-admin/root-token)"
+        if ! vault secrets list -format=json | grep -q '"transit/"'; then
+          vault secrets enable transit >/dev/null
+        fi
+        if ! vault read transit/keys/autounseal >/dev/null 2>&1; then
+          vault write -f transit/keys/autounseal >/dev/null
+        fi
         vault policy write pki-sentinel-autounseal - <<'POLICY'
         path "transit/encrypt/autounseal" {
           capabilities = ["update"]
@@ -180,19 +199,22 @@ services:
           capabilities = ["update"]
         }
         POLICY
-        if [ -s /run/vault-seal/transit-token ] && \
-          VAULT_TOKEN="$(cat /run/vault-seal/transit-token)" vault token lookup >/dev/null 2>&1; then
+        if [ -s /run/vault-seal-runtime/transit-token ] && \
+          VAULT_TOKEN="$$(cat /run/vault-seal-runtime/transit-token)" vault token lookup >/dev/null 2>&1; then
           exit 0
         fi
         umask 077
         vault token create -orphan -policy=pki-sentinel-autounseal -period=24h \
-          -field=token > /run/vault-seal/transit-token
-        chmod 0400 /run/vault-seal/transit-token
+          -field=token > /run/vault-seal-runtime/transit-token
+        chmod 0400 /run/vault-seal-runtime/transit-token
     volumes:
-      - ./.data/vault-seal:/run/vault-seal
+      - ./.data/vault-seal:/run/vault-seal-admin:ro
+      - ./.data/vault-seal-runtime:/run/vault-seal-runtime
     depends_on:
       vault-seal:
         condition: service_healthy
+      vault-seal-runtime-init:
+        condition: service_completed_successfully
     restart: "no"
 
   # Normalize bind-mount ownership before Vault drops privileges to its
@@ -214,13 +236,13 @@ services:
     image: ${VAULT_IMAGE}
     container_name: pki-vault
     cap_add: ["IPC_LOCK"]
-    # The root token for vault-seal is never injected into this container.
-    # Read a dedicated transit-only token before the official entrypoint drops
-    # privileges; it supplies the default configuration directory itself.
+    # This mount contains only the transit seal token. The administrative seal
+    # store is deliberately absent, so a primary compromise cannot read the
+    # seal Vault root token, Shamir key, init document, or Raft database.
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        export VAULT_TOKEN="$(cat /run/vault-seal/transit-token)"
+        export VAULT_TOKEN="$$(cat /run/vault-seal/transit-token)"
         exec /usr/local/bin/docker-entrypoint.sh vault server -config=/vault/config/vault.hcl
     environment:
       VAULT_ADDR: http://127.0.0.1:8200
@@ -230,7 +252,7 @@ services:
       - ./config/vault:/vault/config:ro
       - ./.data/vault:/vault/data
       - ./.data/vault-logs:/vault/logs
-      - ./.data/vault-seal:/run/vault-seal:ro
+      - ./.data/vault-seal-runtime:/run/vault-seal:ro
     depends_on:
       vault-seal:
         condition: service_healthy

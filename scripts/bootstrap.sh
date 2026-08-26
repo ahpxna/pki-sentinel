@@ -26,7 +26,9 @@ DATA_DIR="${REPO_ROOT}/.data"
 INIT_FILE="${DATA_DIR}/vault-init.json"
 TF_TOKEN_FILE="${DATA_DIR}/tf-token"
 TF_APPROLE_FILE="${DATA_DIR}/approle/terraform.env"
-TF_POLICY_FILE="${REPO_ROOT}/terraform/bootstrap/policies/terraform-bootstrap.hcl"
+TF_PERSISTENT_POLICY_FILE="${REPO_ROOT}/terraform/bootstrap/policies/terraform-bootstrap.hcl"
+TF_ADMIN_POLICY_FILE="${REPO_ROOT}/terraform/bootstrap/policies/terraform-bootstrap-admin.hcl"
+TF_DAY2_SCRIPT="${REPO_ROOT}/scripts/terraform-day2.sh"
 KEEP_ROOT="${PKI_SENTINEL_KEEP_ROOT:-0}"
 
 mkdir -p "${DATA_DIR}/approle"
@@ -36,25 +38,19 @@ dc() { (cd "${REPO_ROOT}" && docker compose "$@"); }
 echo "[bootstrap] 1/9 waiting for vault-seal to be reachable..."
 wait_for_cmd 60 dc exec -T vault-seal vault status
 
-echo "[bootstrap] 2/9 enabling transit engine + autounseal key on vault-seal (idempotent)..."
-dc exec -T -e VAULT_ADDR="http://127.0.0.1:8200" -e VAULT_TOKEN="${VAULT_SEAL_TOKEN}" \
-  vault-seal vault secrets enable transit >/dev/null 2>&1 || true
-dc exec -T -e VAULT_ADDR="http://127.0.0.1:8200" -e VAULT_TOKEN="${VAULT_SEAL_TOKEN}" \
-  vault-seal vault write -f transit/keys/autounseal >/dev/null 2>&1 || true
-
-echo "[bootstrap] 3/9 restarting vault so it can reach the transit key..."
+echo "[bootstrap] 2/9 restarting vault so it can reach the transit key..."
 dc restart vault
 wait_for_http "${VAULT_ADDR}/v1/sys/health?standbyok=true&uninitcode=501" 90 '^(2|3|5)[0-9][0-9]$'
 
 INITIALIZED="$(curl -s "${VAULT_ADDR}/v1/sys/health" | jq -r '.initialized')"
 if [[ "${INITIALIZED}" == "false" ]]; then
-  echo "[bootstrap] 4/9 vault not yet initialized — running 'vault operator init'..."
+  echo "[bootstrap] 3/9 vault not yet initialized — running 'vault operator init'..."
   echo "[bootstrap]     NOTE: with transit auto-unseal these are RECOVERY keys, not unseal keys."
   dc exec -T -e VAULT_ADDR="http://127.0.0.1:8200" vault \
     vault operator init -recovery-shares=3 -recovery-threshold=2 -format=json > "${INIT_FILE}"
   chmod 600 "${INIT_FILE}"
 elif [[ -f "${INIT_FILE}" ]]; then
-	echo "[bootstrap] 4/9 ${INIT_FILE} already exists — skipping init (idempotent)."
+	echo "[bootstrap] 3/9 ${INIT_FILE} already exists — skipping init (idempotent)."
 else
   echo "[bootstrap] FATAL: Vault is initialized but ${INIT_FILE} is missing." >&2
   echo "[bootstrap] Recover an administrative token using the documented generate-root procedure; do not initialize again." >&2
@@ -68,7 +64,7 @@ if [[ -z "${ROOT_TOKEN}" || "${ROOT_TOKEN}" == "null" ]]; then
 fi
 export VAULT_ADDR
 
-echo "[bootstrap] 5/9 asserting Vault auto-unsealed without any manual step..."
+echo "[bootstrap] 4/9 asserting Vault auto-unsealed without any manual step..."
 SEALED="$(curl -s "${VAULT_ADDR}/v1/sys/health" | jq -r '.sealed')"
 if [[ "${SEALED}" != "false" ]]; then
   echo "[bootstrap] FATAL: Vault is still sealed. Auto-unseal is broken — check 'docker compose logs vault | grep -i seal'." >&2
@@ -120,31 +116,43 @@ if [[ -z "${TF_TOKEN}" ]]; then
     echo "[bootstrap] Follow docs/runbooks/vault-seal-recovery.md to generate a temporary administrative token, then rerun bootstrap." >&2
     exit 1
   fi
-  echo "[bootstrap] 6/9 installing the least-privilege Terraform bootstrap policy..."
-  policy_payload="$(jq -n --rawfile policy "${TF_POLICY_FILE}" '{policy:$policy}')"
+  echo "[bootstrap] 5/9 installing one-shot and persistent Terraform policies..."
+  policy_payload="$(jq -n --rawfile policy "${TF_ADMIN_POLICY_FILE}" '{policy:$policy}')"
+  curl -fsS --request PUT \
+    --header "X-Vault-Token: ${ROOT_TOKEN}" \
+    --data "${policy_payload}" \
+    "${VAULT_ADDR}/v1/sys/policies/acl/pki-sentinel-terraform-bootstrap-admin" >/dev/null
+  policy_payload="$(jq -n --rawfile policy "${TF_PERSISTENT_POLICY_FILE}" '{policy:$policy}')"
   curl -fsS --request PUT \
     --header "X-Vault-Token: ${ROOT_TOKEN}" \
     --data "${policy_payload}" \
     "${VAULT_ADDR}/v1/sys/policies/acl/pki-sentinel-terraform" >/dev/null
   TF_TOKEN="$(curl -fsS --request POST \
     --header "X-Vault-Token: ${ROOT_TOKEN}" \
-    --data '{"policies":["pki-sentinel-terraform"],"ttl":"30m","renewable":false}' \
+    --data '{"policies":["pki-sentinel-terraform-bootstrap-admin"],"ttl":"30m","renewable":false}' \
     "${VAULT_ADDR}/v1/auth/token/create" | jq -r '.auth.client_token')"
   printf '%s' "${TF_TOKEN}" > "${TF_TOKEN_FILE}"
   chmod 600 "${TF_TOKEN_FILE}"
+  TF_MODE="bootstrap-admin"
+else
+  TF_MODE="day2"
 fi
 
-echo "[bootstrap] 7/9 running terraform apply against terraform/bootstrap..."
+echo "[bootstrap] 6/9 running Terraform in ${TF_MODE} mode..."
 (
   cd "${REPO_ROOT}/terraform/bootstrap"
   export VAULT_ADDR
   export VAULT_TOKEN="${TF_TOKEN}"
   export TF_VAR_vault_addr="${VAULT_ADDR}"
   terraform init -input=false
-  terraform apply -auto-approve -input=false
+  if [[ "${TF_MODE}" == "bootstrap-admin" ]]; then
+    terraform apply -auto-approve -input=false
+  else
+    "${TF_DAY2_SCRIPT}" apply -auto-approve -input=false
+  fi
 )
 
-echo "[bootstrap] 8/9 starting application services with generated AppRole credentials..."
+echo "[bootstrap] 7/9 starting application services with generated AppRole credentials..."
 bash "${REPO_ROOT}/scripts/generate-executor-token.sh"
 dc --profile app up -d
 
@@ -160,9 +168,9 @@ if ! TF_TOKEN="$(terraform_approle_login)"; then
 fi
 printf '%s' "${TF_TOKEN}" > "${TF_TOKEN_FILE}"
 chmod 600 "${TF_TOKEN_FILE}"
-echo "[bootstrap]     rotated persisted Terraform token to Terraform AppRole."
+echo "[bootstrap]     rotated persisted Terraform token to the restricted day-2 AppRole."
 
-echo "[bootstrap] 9/9 revoking the root token (guard: PKI_SENTINEL_KEEP_ROOT=1 to skip)..."
+echo "[bootstrap] 8/9 revoking the root token (guard: PKI_SENTINEL_KEEP_ROOT=1 to skip)..."
 if [[ "${KEEP_ROOT}" == "1" ]]; then
   echo "[bootstrap]     PKI_SENTINEL_KEEP_ROOT=1 set — keeping root token for local iteration."
 else

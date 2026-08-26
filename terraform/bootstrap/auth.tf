@@ -14,7 +14,10 @@ locals {
       policies = [vault_policy.traefik_acme.name]
     }
     terraform = {
-      policies = [vault_policy.terraform_bootstrap.name]
+      # This policy is installed only by the short-lived bootstrap-admin
+      # credential in scripts/bootstrap.sh. The resulting AppRole must never
+      # manage or rewrite the ACL policy that grants its own authority.
+      policies = ["pki-sentinel-terraform"]
     }
   }
 }

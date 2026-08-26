@@ -218,7 +218,6 @@ convenience. None of them are hidden — see also `SECURITY.md` and
 | `GRAFANA_ADMIN_PASSWORD` in `.env` | trivial credential | SSO/OIDC |
 | ACME with no External Account Binding | any workload on the network can request a cert | `eab_policy: always-required` |
 | Static non-expiring AppRole SecretIDs | credential remains usable until revoked | workload identity or automated response-wrapped SecretID rotation |
-| Dev-mode seal Vault | compromise of the seal service reaches seal-Vault administration | KMS/HSM; the primary Vault already receives only an encrypt/decrypt-only transit token |
 
 ## Roadmap
 

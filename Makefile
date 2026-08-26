@@ -73,7 +73,7 @@ tf-init: ## terraform init in terraform/bootstrap
 
 .PHONY: tf-apply
 tf-apply: ## terraform apply in terraform/bootstrap
-	cd terraform/bootstrap && terraform apply -auto-approve -input=false
+	./scripts/terraform-day2.sh apply -auto-approve -input=false
 
 .PHONY: tf-destroy
 tf-destroy: ## terraform destroy in terraform/bootstrap
@@ -108,7 +108,7 @@ chaos-sweep: ## Sweep injected OCSP-path latency; writes docs/benchmarks/data/ch
 # ── Phase 4: observability & Wazuh ─────────────────────────────────────────
 
 .PHONY: up-full
-up-full: env prepare-dev-tls truststore-baseline ## Start core + observability (Prometheus/Grafana/Alertmanager)
+up-full: env prepare-dev-tls truststore-baseline-init ## Start core + observability (Prometheus/Grafana/Alertmanager)
 	./scripts/gen-slack-url-file.sh
 	docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile app up -d
 	@$(MAKE) status
@@ -132,11 +132,28 @@ wazuh-live-test: env ## Prove live Vault audit ingestion reaches Wazuh rule 1001
 truststore-drift-demo: ## Install a synthetic rogue CA on the host and show truststore-drift-agent detect it
 	./scripts/truststore-drift-demo.sh
 
-.PHONY: truststore-baseline
-truststore-baseline: ## Create a demo signed trust policy for the Prometheus exporter
+.PHONY: truststore-baseline-init
+truststore-baseline-init: ## Create the initial signed trust policy only when none exists
 	@mkdir -p .data/truststore/extra-cas .data/truststore/published .data/truststore/signer .data/truststore/state
+	@if [ -s .data/truststore/published/baseline.json ] && [ -s .data/truststore/published/baseline.pub ] && [ -s .data/truststore/signer/baseline.key ]; then \
+	  echo "truststore baseline already exists; preserving accepted sequence"; \
+	else \
+	  docker compose run --rm -T truststore-drift-agent baseline \
+	    -o /data/published/baseline.json \
+	    --private-key /data/signer/baseline.key \
+	    --public-key /data/published/baseline.pub; \
+	fi
+
+.PHONY: truststore-baseline
+truststore-baseline: truststore-baseline-init ## Backward-compatible alias for idempotent baseline initialization
+
+.PHONY: truststore-baseline-update
+truststore-baseline-update: ## Create the next signed baseline with a monotonic sequence and digest link
+	@mkdir -p .data/truststore/extra-cas .data/truststore/published .data/truststore/signer .data/truststore/state
+	@test -s .data/truststore/published/baseline.json || (echo "missing baseline; run make truststore-baseline-init first" >&2; exit 1)
 	docker compose run --rm -T truststore-drift-agent baseline \
 	  -o /data/published/baseline.json \
+	  --next-from /data/published/baseline.json \
 	  --private-key /data/signer/baseline.key \
 	  --public-key /data/published/baseline.pub
 

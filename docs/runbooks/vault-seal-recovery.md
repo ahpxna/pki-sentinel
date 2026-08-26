@@ -21,17 +21,23 @@ or revoked while Vault is sealed.
 
    ```bash
    docker compose ps vault-seal
-   docker compose exec -T -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN="${VAULT_SEAL_TOKEN}" \
-     vault-seal vault read transit/keys/autounseal
+   docker compose exec -T vault-seal sh -ec '
+     export VAULT_ADDR=http://127.0.0.1:8200
+     export VAULT_TOKEN="$(cat /vault/seal/root-token)"
+     vault read transit/keys/autounseal
+   '
    ```
 
-3. If `vault-seal` is down, restart it and then restart `vault`. Its Raft data
-   volume must remain intact; never delete `.data/vault-seal` during recovery:
+3. If `vault-seal` is down, restart it, refresh the dedicated transit token,
+   then restart `vault`. A periodic token may have expired while primary Vault
+   was down. Its Raft administration volume must remain intact; never delete
+   `.data/vault-seal` during recovery:
 
    ```bash
    docker compose restart vault-seal
    source scripts/lib/wait_for.sh
    wait_for_cmd 60 docker compose exec -T vault-seal vault status
+   docker compose up --force-recreate --no-deps vault-seal-init
    docker compose restart vault
    ```
 

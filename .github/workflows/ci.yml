@@ -156,6 +156,39 @@ jobs:
             echo "::error file=terraform/bootstrap/main.tf,line=1,title=Bootstrap failed::${bootstrap_diagnostics}"
             exit 1
           fi
+      - name: enforce seal and Terraform privilege boundaries
+        run: |
+          docker compose exec -T vault sh -ec '
+            test ! -e /run/vault-seal/root-token
+            test ! -e /run/vault-seal/unseal-key
+            test ! -e /run/vault-seal/init.json
+            test ! -e /run/vault-seal/data
+            test -s /run/vault-seal/transit-token
+          '
+          for path in \
+            sys/policies/acl/pki-sentinel-terraform \
+            sys/policies/acl/evil \
+            sys/auth/anything \
+            auth/approle/role/evil; do
+            capabilities="$(docker compose exec -T -e VAULT_TOKEN="$(<.data/tf-token)" vault vault token capabilities "${path}" | tr -d '\r')"
+            test "${capabilities}" = "deny"
+          done
+      - name: verify seal restart refreshes an expired transit token
+        run: |
+          stale_token="$(<.data/vault-seal-runtime/transit-token)"
+          docker compose exec -T vault-seal sh -ec '
+            export VAULT_ADDR=http://127.0.0.1:8200
+            export VAULT_TOKEN="$(cat /vault/seal/root-token)"
+            vault token revoke "$1"
+          ' sh "${stale_token}"
+          docker compose restart vault-seal
+          source scripts/lib/wait_for.sh
+          wait_for_cmd 60 docker compose exec -T vault-seal vault status
+          docker compose up --force-recreate --no-deps vault-seal-init
+          test -s .data/vault-seal-runtime/transit-token
+          test "$(<.data/vault-seal-runtime/transit-token)" != "${stale_token}"
+          docker compose restart vault
+          wait_for_http "http://localhost:8200/v1/sys/health?standbyok=true" 90 '^2[0-9][0-9]$'
       - name: build probe + truststore-drift-agent binaries
         run: |
           (cd services/revocation-probe && go build -o bin/probe ./cmd/probe)
@@ -218,7 +251,7 @@ jobs:
           export VAULT_TOKEN="$(<.data/tf-token)"
           export TF_VAR_vault_addr="$VAULT_ADDR"
           terraform -chdir=terraform/bootstrap init -input=false
-          terraform -chdir=terraform/bootstrap plan -input=false -out=/tmp/pki-sentinel.tfplan
+          ./scripts/terraform-day2.sh plan -input=false -out=/tmp/pki-sentinel.tfplan
           terraform -chdir=terraform/bootstrap show -json /tmp/pki-sentinel.tfplan > /tmp/pki-sentinel-plan.json
           conftest test /tmp/pki-sentinel-plan.json --policy policy/opa/
       - name: step summary

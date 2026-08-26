@@ -111,7 +111,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  truststore-drift-agent baseline -o <baseline.json> [--sequence N] [--previous-digest SHA256] [--expires-in 8760h] [--private-key key.pem] [--public-key key.pub.pem] [--extra-ca-dir path]
+  truststore-drift-agent baseline -o <baseline.json> [--sequence N] [--previous-digest SHA256] [--next-from accepted-baseline.json] [--expires-in 8760h] [--private-key key.pem] [--public-key key.pub.pem] [--extra-ca-dir path]
   truststore-drift-agent check -b <baseline.json> [--public-key key.pub.pem] [--state baseline.state] [--extra-ca-dir path] [--log /var/log/pki-sentinel/truststore.json]
   truststore-drift-agent serve -b <baseline.json> [--public-key key.pub.pem] [--state baseline.state] [--extra-ca-dir path] [--listen :9120] [--interval 60s]`)
 }
@@ -123,6 +123,7 @@ func cmdBaseline(args []string) {
 	extraCADir := parseFlag(args, "--extra-ca-dir", "/usr/local/share/ca-certificates")
 	sequenceText := parseFlag(args, "--sequence", "1")
 	previousDigest := parseFlag(args, "--previous-digest", "")
+	nextFromPath := parseFlag(args, "--next-from", "")
 	expiresInText := parseFlag(args, "--expires-in", "8760h")
 	var sequence uint64
 	if _, err := fmt.Sscan(sequenceText, &sequence); err != nil || sequence == 0 {
@@ -132,6 +133,33 @@ func cmdBaseline(args []string) {
 	if sequence > 1 && previousDigest == "" {
 		fmt.Fprintln(os.Stderr, "baseline: --previous-digest is required when --sequence is greater than 1")
 		os.Exit(2)
+	}
+	if nextFromPath != "" {
+		data, err := os.ReadFile(nextFromPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "baseline: reading --next-from %s: %v\n", nextFromPath, err)
+			os.Exit(2)
+		}
+		previous, err := parseStrictBaseline(data)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "baseline: parsing --next-from %s: %v\n", nextFromPath, err)
+			os.Exit(2)
+		}
+		publicKey, err := loadPublicKey(publicKeyPath)
+		if err != nil || verifyBaseline(previous, publicKey) != nil {
+			fmt.Fprintf(os.Stderr, "baseline: --next-from %s is not signed by %s\n", nextFromPath, publicKeyPath)
+			os.Exit(2)
+		}
+		previousDigest, err = baselineDigest(previous)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "baseline: hashing --next-from: %v\n", err)
+			os.Exit(2)
+		}
+		if previous.Sequence == ^uint64(0) {
+			fmt.Fprintln(os.Stderr, "baseline: --next-from sequence cannot be incremented")
+			os.Exit(2)
+		}
+		sequence = previous.Sequence + 1
 	}
 	expiresIn, err := time.ParseDuration(expiresInText)
 	if err != nil || expiresIn <= 0 {
@@ -154,6 +182,10 @@ func cmdBaseline(args []string) {
 		}
 		return b.Roots[i].SPKIHash < b.Roots[j].SPKIHash
 	})
+	if err := validateBaseline(b); err != nil {
+		fmt.Fprintf(os.Stderr, "baseline: %v\n", err)
+		os.Exit(2)
+	}
 	privateKey, err := loadOrCreateSigningKey(privateKeyPath, publicKeyPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "baseline: signing key: %v\n", err)
@@ -268,25 +300,32 @@ func parseStrictBaseline(data []byte) (Baseline, error) {
 		}
 		return Baseline{}, err
 	}
-	seenSPKI := make(map[string]struct{}, len(baseline.Roots))
-	seenSubject := make(map[string]struct{}, len(baseline.Roots))
+	return baseline, validateBaseline(baseline)
+}
+
+// validateBaseline is shared by the producer and strict parser. Subject DNs
+// and public keys are not unique certificate identities: distinct roots may
+// legitimately share either. Exact certificate DER is the identity key, while
+// shared SPKIs remain visible to certificate and policy drift detection.
+func validateBaseline(baseline Baseline) error {
+	seenIdentity := make(map[string]struct{}, len(baseline.Roots))
 	for _, root := range baseline.Roots {
 		if root.SPKIHash == "" {
-			return Baseline{}, fmt.Errorf("baseline root has an empty SPKI hash")
+			return fmt.Errorf("baseline root has an empty SPKI hash")
 		}
-		if _, duplicate := seenSPKI[root.SPKIHash]; duplicate {
-			return Baseline{}, fmt.Errorf("baseline contains duplicate SPKI hash %q", root.SPKIHash)
-		}
-		seenSPKI[root.SPKIHash] = struct{}{}
 		if root.Subject == "" {
-			return Baseline{}, fmt.Errorf("baseline root has an empty subject")
+			return fmt.Errorf("baseline root has an empty subject")
 		}
-		if _, duplicate := seenSubject[root.Subject]; duplicate {
-			return Baseline{}, fmt.Errorf("baseline contains duplicate subject %q", root.Subject)
+		identity := "spki:" + root.SPKIHash
+		if root.CertHash != "" {
+			identity = "cert:" + root.CertHash
 		}
-		seenSubject[root.Subject] = struct{}{}
+		if _, duplicate := seenIdentity[identity]; duplicate {
+			return fmt.Errorf("baseline contains duplicate certificate identity %q", identity)
+		}
+		seenIdentity[identity] = struct{}{}
 	}
-	return baseline, nil
+	return nil
 }
 
 func rejectDuplicateJSONKeys(data []byte) error {
@@ -367,21 +406,54 @@ func scanTrustStore(baselinePath, publicKeyPath, statePath, extraCADir string, n
 
 func evaluateTrustStore(baseline Baseline, certs []*x509.Certificate, now time.Time) ScanResult {
 	result := ScanResult{BaselineValid: true, ScanSuccess: true, LastScan: now}
-	knownByHash := make(map[string]RootEntry, len(baseline.Roots))
+	knownByCertHash := make(map[string]RootEntry, len(baseline.Roots))
+	knownBySPKI := make(map[string][]RootEntry, len(baseline.Roots))
 	knownBySubject := make(map[string]RootEntry, len(baseline.Roots))
-	observedByHash := make(map[string]*x509.Certificate, len(certs))
+	observedByCertHash := make(map[string]*x509.Certificate, len(certs))
+	observedSPKIs := make(map[string]struct{}, len(certs))
 	for _, root := range baseline.Roots {
-		knownByHash[root.SPKIHash] = root
+		if root.CertHash != "" {
+			knownByCertHash[root.CertHash] = root
+		}
+		knownBySPKI[root.SPKIHash] = append(knownBySPKI[root.SPKIHash], root)
 		knownBySubject[root.Subject] = root
 	}
 	for _, cert := range certs {
-		observedByHash[spkiHash(cert)] = cert
+		observedByCertHash[certificateHash(cert)] = cert
+		observedSPKIs[spkiHash(cert)] = struct{}{}
 	}
 
 	for _, c := range certs {
-		hash := spkiHash(c)
+		spki := spkiHash(c)
+		certHash := certificateHash(c)
 		subject := c.Subject.String()
-		if known, exists := knownByHash[hash]; !exists {
+		if known, exists := knownByCertHash[certHash]; exists {
+			observed := rootEntry(c)
+			if known.PolicyHash != "" && known.PolicyHash != observed.PolicyHash {
+				result.ChangedRoots++
+				result.Events = append(result.Events, DriftEvent{Timestamp: now, Event: "ROOT_POLICY_CHANGED", Subject: subject, SPKIHash: spki})
+			}
+		} else if candidates := knownBySPKI[spki]; len(candidates) > 0 {
+			legacyMatch := false
+			for _, known := range candidates {
+				if known.CertHash == "" {
+					legacyMatch = true
+					break
+				}
+			}
+			if !legacyMatch {
+				observed := rootEntry(c)
+				eventType := "ROOT_CERT_CHANGED"
+				for _, known := range candidates {
+					if known.PolicyHash != "" && known.PolicyHash != observed.PolicyHash {
+						eventType = "ROOT_POLICY_CHANGED"
+						break
+					}
+				}
+				result.ChangedRoots++
+				result.Events = append(result.Events, DriftEvent{Timestamp: now, Event: eventType, Subject: subject, SPKIHash: spki})
+			}
+		} else {
 			result.UnknownRoots++
 			eventType := "UNKNOWN_ROOT_ADDED"
 			if _, sameSubject := knownBySubject[subject]; sameSubject {
@@ -389,33 +461,28 @@ func evaluateTrustStore(baseline Baseline, certs []*x509.Certificate, now time.T
 				eventType = "ROOT_CHANGED"
 			}
 			result.Events = append(result.Events, DriftEvent{
-				Timestamp: now, Event: eventType, Subject: subject, SPKIHash: hash,
+				Timestamp: now, Event: eventType, Subject: subject, SPKIHash: spki,
 			})
-		} else {
-			observed := rootEntry(c)
-			if known.CertHash != "" && known.CertHash != observed.CertHash {
-				result.ChangedRoots++
-				eventType := "ROOT_CERT_CHANGED"
-				if known.PolicyHash != observed.PolicyHash {
-					eventType = "ROOT_POLICY_CHANGED"
-				}
-				result.Events = append(result.Events, DriftEvent{Timestamp: now, Event: eventType, Subject: subject, SPKIHash: hash})
-			}
 		}
 		if now.After(c.NotAfter) {
 			result.ExpiredRoots++
 			result.Events = append(result.Events, DriftEvent{
-				Timestamp: now, Event: "ROOT_EXPIRED", Subject: subject, SPKIHash: hash,
+				Timestamp: now, Event: "ROOT_EXPIRED", Subject: subject, SPKIHash: spki,
 			})
 		} else if c.NotAfter.Before(now.Add(30 * 24 * time.Hour)) {
 			result.ExpiringRoots++
 			result.Events = append(result.Events, DriftEvent{
-				Timestamp: now, Event: "ROOT_EXPIRING", Subject: subject, SPKIHash: hash,
+				Timestamp: now, Event: "ROOT_EXPIRING", Subject: subject, SPKIHash: spki,
 			})
 		}
 	}
-	for hash, root := range knownByHash {
-		if _, observed := observedByHash[hash]; observed {
+	for _, root := range baseline.Roots {
+		if root.CertHash != "" {
+			if _, observed := observedByCertHash[root.CertHash]; observed {
+				continue
+			}
+		}
+		if _, substituted := observedSPKIs[root.SPKIHash]; substituted {
 			continue
 		}
 		result.MissingRoots++
@@ -900,17 +967,24 @@ func loadTrustStore(extraCADir string) ([]*x509.Certificate, error) {
 	if !found {
 		return nil, fmt.Errorf("loadTrustStore: no known trust store location found (checked %v)", candidates)
 	}
+	return deduplicateCertificates(certs), nil
+}
+
+func deduplicateCertificates(certs []*x509.Certificate) []*x509.Certificate {
 	unique := make([]*x509.Certificate, 0, len(certs))
 	seen := make(map[string]struct{}, len(certs))
 	for _, cert := range certs {
-		hash := spkiHash(cert)
+		// Deduplicate only byte-identical DER certificates. Distinct roots that
+		// reuse a public key must reach evaluation so same-SPKI certificate or
+		// policy drift cannot be hidden by loader order.
+		hash := certificateHash(cert)
 		if _, ok := seen[hash]; ok {
 			continue
 		}
 		seen[hash] = struct{}{}
 		unique = append(unique, cert)
 	}
-	return unique, nil
+	return unique
 }
 
 func appendPEMCertificates(certs []*x509.Certificate, data []byte) []*x509.Certificate {
