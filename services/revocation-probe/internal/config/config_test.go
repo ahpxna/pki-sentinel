@@ -61,8 +61,8 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.PollInterval != 2*time.Second || cfg.MaxWait != 180*time.Second || cfg.MaxAttempts != 90 {
-		t.Errorf("expected defaults, got poll_interval=%s max_wait=%s max_attempts=%d", cfg.PollInterval, cfg.MaxWait, cfg.MaxAttempts)
+	if cfg.PollInterval != 2*time.Second || cfg.MaxWait != 180*time.Second || cfg.MaxAttempts != 90 || cfg.PreflightMaxAge != 2*time.Second {
+		t.Errorf("expected defaults, got poll_interval=%s max_wait=%s max_attempts=%d preflight_max_age=%s", cfg.PollInterval, cfg.MaxWait, cfg.MaxAttempts, cfg.PreflightMaxAge)
 	}
 }
 
@@ -134,6 +134,17 @@ func TestLoadRejectsZeroEnabledProfiles(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected config with no enabled profiles to be rejected")
+	}
+}
+
+func TestLoadRejectsNonPositivePreflightMaxAge(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profiles.yaml")
+	if err := os.WriteFile(path, []byte("preflight_max_age: -1s\nprofiles:\n  - name: curl-default\n    enabled: true\n    timeout: 5s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected non-positive preflight_max_age to be rejected")
 	}
 }
 

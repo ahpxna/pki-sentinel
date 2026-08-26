@@ -90,9 +90,16 @@ type Manifest struct {
 	ID                   profiles.Scenario
 	Version              int
 	Digest               string
+	canonicalJSON        []byte
 	EvidenceDependencies map[string][]EvidenceDependency
 	Profiles             map[string]Contract
 	Stapling             StaplingMode
+}
+
+// CanonicalJSON returns the exact normalized scenario artifact whose SHA-256
+// is exposed as Digest. The copy prevents callers from mutating registry state.
+func (m Manifest) CanonicalJSON() []byte {
+	return append([]byte(nil), m.canonicalJSON...)
 }
 
 // Registry provides scenario contracts and their digests by stable ID.
@@ -106,6 +113,13 @@ type Registry struct {
 func New(manifests ...Manifest) *Registry {
 	registry := &Registry{manifests: make(map[profiles.Scenario]Manifest, len(manifests))}
 	for _, manifest := range manifests {
+		if len(manifest.canonicalJSON) == 0 {
+			canonical, _ := json.Marshal(struct {
+				ID      profiles.Scenario `json:"id"`
+				Version int               `json:"version"`
+			}{ID: manifest.ID, Version: manifest.Version})
+			manifest.canonicalJSON = canonical
+		}
 		registry.manifests[manifest.ID] = manifest
 	}
 	return registry
@@ -223,13 +237,13 @@ func decode(path string) (yamlManifest, error) {
 	return manifest, nil
 }
 
-func canonicalDigest(manifest yamlManifest) (string, error) {
+func canonicalManifest(manifest yamlManifest) ([]byte, string, error) {
 	canonical, err := json.Marshal(manifest)
 	if err != nil {
-		return "", fmt.Errorf("canonical JSON: %w", err)
+		return nil, "", fmt.Errorf("canonical JSON: %w", err)
 	}
 	sum := sha256.Sum256(canonical)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	return canonical, "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 func knownProfiles(values []profiles.Profile) map[string]profiles.Profile {
@@ -269,11 +283,11 @@ func build(raw yamlManifest, profilesByName map[string]profiles.Profile) (Manife
 		return Manifest{}, fmt.Errorf("scenario %q has invalid execution.stapling %q", raw.ID, raw.Execution.Stapling)
 	}
 	normalizeManifest(&raw)
-	digest, err := canonicalDigest(raw)
+	canonical, digest, err := canonicalManifest(raw)
 	if err != nil {
 		return Manifest{}, err
 	}
-	manifest := Manifest{ID: profiles.Scenario(raw.ID), Version: raw.Version, Digest: digest, EvidenceDependencies: raw.EvidenceDependencies, Profiles: make(map[string]Contract, len(raw.Profiles)), Stapling: raw.Execution.Stapling}
+	manifest := Manifest{ID: profiles.Scenario(raw.ID), Version: raw.Version, Digest: digest, canonicalJSON: canonical, EvidenceDependencies: raw.EvidenceDependencies, Profiles: make(map[string]Contract, len(raw.Profiles)), Stapling: raw.Execution.Stapling}
 	for name, rawContract := range raw.Profiles {
 		if _, ok := profilesByName[name]; !ok {
 			return Manifest{}, fmt.Errorf("scenario %q references unknown profile %q", raw.ID, name)

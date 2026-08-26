@@ -191,6 +191,10 @@ jobs:
           docker compose exec -T revocation-probe \
             probe attest verify --public-key /run/attestation/assurance.pub \
               --input /run/attestation/last-cycle.attestation.json
+          cycle_id="$(jq -r '.cycle_id' /tmp/cycle.json)"
+          test -n "$cycle_id" && test "$cycle_id" != "null"
+          docker compose exec -T revocation-probe \
+            cat "/var/lib/pki-sentinel/evidence/${cycle_id}/scenario.json" > /tmp/scenario.json
           cat /tmp/cycle.json
           echo
       - name: go test -tags=integration
@@ -199,6 +203,7 @@ jobs:
           PROBE_REPORT: /tmp/cycle.json
           PROBE_ATTESTATION: /tmp/last-cycle.attestation.json
           PROBE_ATTESTATION_PUBLIC_KEY: /tmp/assurance.pub
+          PROBE_SCENARIO_ARTIFACT: /tmp/scenario.json
         run: go test -tags=integration ./... -v
       - name: install conftest for the live Terraform-plan policy gate
         run: |

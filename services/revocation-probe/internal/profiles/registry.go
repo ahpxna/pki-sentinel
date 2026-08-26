@@ -217,13 +217,26 @@ func opensslOCSPDirect() Profile {
 		Name:        "openssl-ocsp-direct",
 		Role:        RoleStatusOracle,
 		Method:      MethodOCSPDirect,
-		Description: "openssl ocsp -issuer chain.pem -cert leaf.pem -url <ocsp_url>",
+		Description: "OpenSSL OCSP transport with Sentinel signature, subject, and freshness classification",
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
 			started := time.Now()
 			metrics.OCSPResponderUp.Set(0)
-			defer func() {
-				metrics.OCSPResponderLatency.Observe(time.Since(started).Seconds())
-			}()
+			defer func() { metrics.OCSPResponderLatency.Observe(time.Since(started).Seconds()) }()
+
+			leaf, presentedHash, err := fetchPresentedLeaf(ctx, target)
+			if err != nil {
+				observation := observe(DecisionHarnessError, ReasonHarnessFailure)
+				observation.Evidence.PresentedLeafSHA256 = presentedHash
+				return observation, err
+			}
+			issuerBlock, _ := pem.Decode([]byte(target.IssuerPEM))
+			if issuerBlock == nil {
+				return observe(DecisionHarnessError, ReasonHarnessFailure), fmt.Errorf("openssl-ocsp-direct: invalid issuer PEM")
+			}
+			issuerCert, err := x509.ParseCertificate(issuerBlock.Bytes)
+			if err != nil {
+				return observe(DecisionHarnessError, ReasonHarnessFailure), fmt.Errorf("openssl-ocsp-direct: parse issuer: %w", err)
+			}
 			issuerPath, cleanupIssuer, err := writeTemp("issuer-*.pem", []byte(target.IssuerPEM))
 			if err != nil {
 				return observe(DecisionHarnessError, ReasonHarnessFailure), err
@@ -234,14 +247,7 @@ func opensslOCSPDirect() Profile {
 				return observe(DecisionHarnessError, ReasonHarnessFailure), err
 			}
 			defer cleanupChain()
-
-			// The probe evaluates the certificate presented by the canary server;
-			// fetch it through a plain TLS connection without verification.
-			leafPEM, err := fetchLeafPEM(ctx, target)
-			if err != nil {
-				return observe(DecisionHarnessError, ReasonHarnessFailure), err
-			}
-			leafPath, cleanupLeaf, err := writeTemp("leaf-*.pem", leafPEM)
+			leafPath, cleanupLeaf, err := writeTemp("leaf-*.pem", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
 			if err != nil {
 				return observe(DecisionHarnessError, ReasonHarnessFailure), err
 			}
@@ -257,46 +263,62 @@ func opensslOCSPDirect() Profile {
 			}
 			defer os.Remove(responsePath)
 
-			stdout, stderr, err := runCmd(ctx, "openssl", "ocsp",
+			stdout, stderr, cmdErr := runCmd(ctx, "openssl", "ocsp",
 				"-issuer", issuerPath, "-cert", leafPath, "-url", target.OCSPURL,
 				"-CAfile", chainPath, "-no_nonce", "-respout", responsePath)
 			responseDER, responseReadErr := os.ReadFile(responsePath)
 			withEvidence := func(observation Observation) Observation {
-				observation = withCommandEvidence(observation, "openssl", stdout, stderr, err)
+				observation = withCommandEvidence(observation, "openssl", stdout, stderr, cmdErr)
+				observation.Evidence.PresentedLeafSHA256 = presentedHash
 				if responseReadErr == nil && len(responseDER) > 0 {
 					observation = withBinaryEvidence(observation, "ocsp-response.der", "application/ocsp-response", responseDER)
 				}
 				return observation
 			}
-			combined := stdout + stderr
-			if err != nil && !strings.Contains(combined, "revoked") {
-				decision := DecisionHarnessError
-				reason := ReasonHarnessFailure
-				var exitErr *exec.ExitError
-				if errors.As(err, &exitErr) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					decision = DecisionInconclusive
-					reason = ReasonNetworkFailure
+
+			if len(responseDER) == 0 {
+				if ctx.Err() != nil || looksLikeNetworkFailure(stderr) {
+					return withEvidence(observe(DecisionInconclusive, ReasonNetworkFailure)), nil
 				}
-				observation := withEvidence(observe(decision, reason))
-				if decision == DecisionHarnessError {
-					return observation, fmt.Errorf("openssl ocsp: %w", err)
+				var execErr *exec.Error
+				if errors.As(cmdErr, &execErr) || responseReadErr != nil {
+					observation := withEvidence(observe(DecisionHarnessError, ReasonHarnessFailure))
+					return observation, fmt.Errorf("openssl ocsp transport failed without a response: command=%v read=%v", cmdErr, responseReadErr)
 				}
-				return observation, nil
+				return withEvidence(observe(DecisionReject, ReasonInvalidStatus)), nil
 			}
-			if strings.Contains(combined, "revoked") {
+
+			resp, parseErr := ocsp.ParseResponseForCert(responseDER, leaf, issuerCert)
+			if parseErr != nil {
+				return withEvidence(observe(DecisionReject, ReasonInvalidStatus)), nil
+			}
+			if reason := checkOCSPFreshness(resp, time.Now(), target.OCSPFreshness); reason != "" {
 				metrics.OCSPResponderUp.Set(1)
-				observation := withEvidence(observe(DecisionReject, ReasonRevoked))
-				return observation, nil
+				return withEvidence(observe(DecisionReject, reason)), nil
 			}
-			if strings.Contains(combined, "good") {
-				metrics.OCSPResponderUp.Set(1)
-				observation := withEvidence(observe(DecisionAccept, ReasonStatusGood))
-				return observation, nil
+			metrics.OCSPResponderUp.Set(1)
+			switch resp.Status {
+			case ocsp.Revoked:
+				return withEvidence(observe(DecisionReject, ReasonRevoked)), nil
+			case ocsp.Good:
+				return withEvidence(observe(DecisionAccept, ReasonStatusGood)), nil
+			case ocsp.Unknown:
+				return withEvidence(observe(DecisionReject, ReasonUnknownStatus)), nil
+			default:
+				return withEvidence(observe(DecisionReject, ReasonInvalidStatus)), nil
 			}
-			observation := withEvidence(observe(DecisionHarnessError, ReasonHarnessFailure))
-			return observation, fmt.Errorf("openssl ocsp: unrecognized output: %s", combined)
 		},
 	}
+}
+
+func looksLikeNetworkFailure(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	for _, marker := range []string{"connection refused", "connection timed out", "timed out", "no route to host", "temporary failure", "name or service not known", "getaddrinfo", "connect error"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- curl-cert-status: --cert-status (must-staple aware) --------------------
@@ -504,28 +526,28 @@ func crlCheck() Profile {
 		Name:        "crl-check",
 		Role:        RoleStatusOracle,
 		Method:      MethodCRL,
-		Description: "download full CRL, verify issuer signature and freshness, then check serial",
+		Description: "download full CRL, verify issuer signature/freshness, and check the exact issued canary serial",
 		Probe: func(ctx context.Context, target Target) (Observation, error) {
-			leafPEM, err := fetchLeafPEM(ctx, target)
+			leaf, presentedHash, err := fetchPresentedLeaf(ctx, target)
 			if err != nil {
-				return observe(DecisionHarnessError, ReasonHarnessFailure), err
+				observation := observe(DecisionHarnessError, ReasonHarnessFailure)
+				observation.Evidence.PresentedLeafSHA256 = presentedHash
+				return observation, err
 			}
-			block, _ := pem.Decode(leafPEM)
-			if block == nil {
-				return observe(DecisionHarnessError, ReasonHarnessFailure), fmt.Errorf("crl-check: could not decode leaf PEM")
+			withLeaf := func(observation Observation) Observation {
+				observation.Evidence.PresentedLeafSHA256 = presentedHash
+				return observation
 			}
-			leaf, err := x509.ParseCertificate(block.Bytes)
-			if err != nil {
-				return observe(DecisionHarnessError, ReasonHarnessFailure), fmt.Errorf("crl-check: parsing leaf: %w", err)
-			}
-
 			crlBytes, err := httpGet(ctx, target.CRLURL)
 			if err != nil {
-				return inProcessObservation("go-crl-oracle", DecisionInconclusive, ReasonNetworkFailure), nil
+				return withLeaf(inProcessObservation("go-crl-oracle", DecisionInconclusive, ReasonNetworkFailure)), nil
+			}
+			withCRL := func(observation Observation) Observation {
+				return withBinaryEvidence(withLeaf(observation), "crl.der", "application/pkix-crl", crlBytes)
 			}
 			crl, err := x509.ParseRevocationList(crlBytes)
 			if err != nil {
-				return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonInvalidStatus), "crl.der", "application/pkix-crl", crlBytes), nil
+				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonInvalidStatus)), nil
 			}
 			issuerBlock, _ := pem.Decode([]byte(target.IssuerPEM))
 			if issuerBlock == nil {
@@ -536,25 +558,26 @@ func crlCheck() Profile {
 				return observe(DecisionHarnessError, ReasonHarnessFailure), fmt.Errorf("crl-check: parsing issuer: %w", err)
 			}
 			if err := crl.CheckSignatureFrom(issuerCert); err != nil {
-				return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonInvalidStatus), "crl.der", "application/pkix-crl", crlBytes), nil
+				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonInvalidStatus)), nil
 			}
-			if crl.ThisUpdate.After(time.Now().Add(5 * time.Minute)) {
-				return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonFutureStatus), "crl.der", "application/pkix-crl", crlBytes), nil
+			now := time.Now()
+			if crl.ThisUpdate.After(now.Add(5 * time.Minute)) {
+				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonFutureStatus)), nil
 			}
 			if crl.NextUpdate.IsZero() {
-				return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonMissingFreshness), "crl.der", "application/pkix-crl", crlBytes), nil
+				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonMissingFreshness)), nil
 			}
-			if time.Now().After(crl.NextUpdate) {
-				return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonStaleStatus), "crl.der", "application/pkix-crl", crlBytes), nil
+			if now.After(crl.NextUpdate) {
+				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonStaleStatus)), nil
 			}
-			metrics.CRLAgeSeconds.Set(time.Since(crl.ThisUpdate).Seconds())
+			metrics.CRLAgeSeconds.Set(now.Sub(crl.ThisUpdate).Seconds())
 			metrics.CRLEntries.Set(float64(len(crl.RevokedCertificateEntries)))
 			for _, entry := range crl.RevokedCertificateEntries {
 				if entry.SerialNumber.Cmp(leaf.SerialNumber) == 0 {
-					return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionReject, ReasonRevoked), "crl.der", "application/pkix-crl", crlBytes), nil
+					return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonRevoked)), nil
 				}
 			}
-			return withBinaryEvidence(inProcessObservation("go-crl-oracle", DecisionAccept, ReasonStatusGood), "crl.der", "application/pkix-crl", crlBytes), nil
+			return withCRL(inProcessObservation("go-crl-oracle", DecisionAccept, ReasonStatusGood)), nil
 		},
 	}
 }
@@ -586,12 +609,12 @@ func checkOCSPFreshness(response *ocsp.Response, now time.Time, configured OCSPF
 
 // --- shared helpers ----------------------------------------------------------
 
-func fetchLeafPEM(ctx context.Context, target Target) ([]byte, error) {
+func fetchPresentedLeaf(ctx context.Context, target Target) (*x509.Certificate, string, error) {
 	addr := fmt.Sprintf("%s:%d", targetConnectHost(target), target.Port)
-	// The leaf-fetch path intentionally bypasses verification: the returned
-	// certificate is immediately used as the subject of an independent OCSP
-	// or CRL check, never as proof that the peer is trusted.
-	// #nosec G402 -- intentional discovery connection explained above.
+	// This discovery connection intentionally bypasses chain verification, but
+	// the certificate identity is then bound to the exact leaf issued for this
+	// cycle. Independence applies to the status-delivery path, not the subject.
+	// #nosec G402 -- exact DER fingerprint binding is enforced immediately below.
 	dialer := &tls.Dialer{Config: &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         target.Host,
@@ -599,18 +622,46 @@ func fetchLeafPEM(ctx context.Context, target Target) ([]byte, error) {
 	}}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("fetchLeafPEM: dial: %w", err)
+		return nil, "", fmt.Errorf("fetchPresentedLeaf: dial: %w", err)
 	}
 	defer conn.Close()
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
-		return nil, fmt.Errorf("fetchLeafPEM: dial did not return a TLS connection")
+		return nil, "", fmt.Errorf("fetchPresentedLeaf: dial did not return a TLS connection")
 	}
 	certs := tlsConn.ConnectionState().PeerCertificates
 	if len(certs) == 0 {
-		return nil, fmt.Errorf("fetchLeafPEM: no peer certificates")
+		return nil, "", fmt.Errorf("fetchPresentedLeaf: no peer certificates")
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certs[0].Raw}), nil
+	leaf := certs[0]
+	presented, err := verifyPresentedLeaf(target, leaf)
+	if err != nil {
+		return nil, presented, fmt.Errorf("fetchPresentedLeaf: %w", err)
+	}
+	return leaf, presented, nil
+}
+
+func verifyPresentedLeaf(target Target, leaf *x509.Certificate) (string, error) {
+	if leaf == nil {
+		return "", fmt.Errorf("peer leaf is nil")
+	}
+	digest := sha256.Sum256(leaf.Raw)
+	presented := hex.EncodeToString(digest[:])
+	if target.IssuedLeafSHA256 == "" {
+		return presented, fmt.Errorf("issued leaf SHA-256 is required")
+	}
+	if !strings.EqualFold(presented, target.IssuedLeafSHA256) {
+		return presented, fmt.Errorf("peer leaf SHA-256 %s does not match issued canary %s", presented, target.IssuedLeafSHA256)
+	}
+	return presented, nil
+}
+
+func fetchLeafPEM(ctx context.Context, target Target) ([]byte, error) {
+	leaf, _, err := fetchPresentedLeaf(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}), nil
 }
 
 var statusHTTPClient = &http.Client{

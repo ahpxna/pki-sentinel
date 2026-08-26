@@ -1,6 +1,10 @@
 package profiles
 
 import (
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,5 +103,27 @@ func TestCheckOCSPFreshness(t *testing.T) {
 	}
 	if got := checkOCSPFreshness(&ocsp.Response{ThisUpdate: now.Add(-time.Hour), NextUpdate: now.Add(-time.Minute)}, now, policy); got != ReasonStaleStatus {
 		t.Fatalf("expired response classified %s", got)
+	}
+}
+
+func TestVerifyPresentedLeafBindsExactIssuedCertificate(t *testing.T) {
+	leaf := &x509.Certificate{Raw: []byte("issued-leaf-der")}
+	sum := sha256.Sum256(leaf.Raw)
+	want := hex.EncodeToString(sum[:])
+	got, err := verifyPresentedLeaf(Target{IssuedLeafSHA256: want}, leaf)
+	if err != nil || got != want {
+		t.Fatalf("verifyPresentedLeaf got=%q err=%v, want %q", got, err, want)
+	}
+	if _, err := verifyPresentedLeaf(Target{IssuedLeafSHA256: strings.Repeat("0", 64)}, leaf); err == nil {
+		t.Fatal("verifyPresentedLeaf accepted a different presented certificate")
+	}
+}
+
+func TestLooksLikeNetworkFailureDoesNotTreatAnyExitErrorAsNetwork(t *testing.T) {
+	if !looksLikeNetworkFailure("connect: Connection refused") {
+		t.Fatal("connection refusal was not classified as network failure")
+	}
+	if looksLikeNetworkFailure("Response Verify Failure") {
+		t.Fatal("cryptographic verification failure was misclassified as network failure")
 	}
 }

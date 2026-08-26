@@ -117,11 +117,16 @@ up-full: env prepare-dev-tls truststore-baseline ## Start core + observability (
 up-wazuh: env prepare-dev-tls ## Start core + observability + Wazuh (profile: wazuh; ~4GB RAM)
 	./scripts/gen-slack-url-file.sh
 	docker compose -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.wazuh.yml --profile app --profile wazuh up -d
+	./scripts/wazuh-configure-vault-audit.sh
 	@$(MAKE) status
 
 .PHONY: wazuh-logtest
 wazuh-logtest: env ## Validate the revocation audit fixture against Wazuh rule 100101
 	./scripts/wazuh-logtest.sh
+
+.PHONY: wazuh-live-test
+wazuh-live-test: env ## Prove live Vault audit ingestion reaches Wazuh rule 100103 (requires bootstrap + up-wazuh)
+	./scripts/wazuh-live-ingestion-test.sh
 
 .PHONY: truststore-drift-demo
 truststore-drift-demo: ## Install a synthetic rogue CA on the host and show truststore-drift-agent detect it

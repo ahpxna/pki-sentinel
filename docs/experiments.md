@@ -24,10 +24,11 @@ meaning of existing measurements.
 
 Implemented in [`services/revocation-probe/scenarios/`](../services/revocation-probe/scenarios/).
 Each version-1 manifest is a strict YAML input; its canonical JSON SHA-256 is
-reported as `scenario_digest` and bound into the signed attestation statement.
-The effective `profiles.yaml` runtime configuration is independently hashed as
-`config_digest`; comments/formatting do not affect it, but polling, freshness,
-policy, enabled-profile, and timeout changes do. The attestation binds both.
+reported as `scenario_digest`, the exact canonical bytes are archived as
+`<cycle-id>/scenario.json`, and the digest is bound into the signed report.
+The report also embeds the effective run configuration and `run_config_digest`,
+including preflight-age bounds, polling budgets, freshness policy, enabled
+profile roles/methods/timeouts, executor mapping, and build identity.
 The runtime rejects unknown fields, decisions, reasons, evidence dependencies,
 duplicate scenario or profile declarations, duplicate/empty reason or dependency
 lists, incompatible decision/reason pairs, orphan dependency declarations,
@@ -58,9 +59,10 @@ The selected `probe run --scenario <id>` manifest controls its canary stapling
 mode and each client profile's evidence boundary. For example,
 `staple_published` holds a profile until a revoked staple is published, while
 `issuer_ack` allows it to begin immediately after issuer acknowledgement.
-`ocsp_published` and `crl_published` fail closed: a dependent client is released
-only after an enabled status oracle confirms `REJECT / REVOKED`; timeout or
-harness failure propagates as a harness error instead of satisfying the barrier.
+`ocsp_published` and `crl_published` are fail-closed: merely finishing an oracle
+goroutine does not satisfy the dependency; the relevant oracle must produce
+validated `REJECT / REVOKED` evidence. Every dependency satisfaction timestamp
+is copied into the signed per-profile result before the client is allowed to run.
 Reason/dependency list ordering is canonicalized before digesting because those
 fields are semantic sets, not execution-order controls. CI validates production
 manifests and the unit suite asserts exact parity with the pre-manifest
@@ -85,8 +87,9 @@ from direct-oracle-only data.
 
 ## Phase 4: reproducibility and supply chain
 
-Archive a scenario manifest, signed report, artifact hashes, container image
-digests, the signed `config_digest`, configuration source, and raw trial CSV as
-one experiment bundle.
+The current cycle bundle archives the canonical scenario artifact and signs
+canonical effective run inputs plus result/artifact hashes. The remaining work
+is to make independently versioned executor image digests first-class for every
+profile and archive raw trial CSV alongside the cycle bundle.
 Use a KMS/HSM-backed signer or a DSSE/in-toto-compatible envelope before
 publishing results outside the controlled environment.

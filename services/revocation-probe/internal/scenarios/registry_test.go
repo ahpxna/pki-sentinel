@@ -1,6 +1,9 @@
 package scenarios
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +48,15 @@ func TestProductionManifestsValidateAndHaveStableDigests(t *testing.T) {
 		}
 		if secondDigest, _ := second.Digest(scenario); secondDigest != firstDigest {
 			t.Fatalf("scenario %s digest is not stable: %s != %s", scenario, firstDigest, secondDigest)
+		}
+		manifest, _ := first.Manifest(scenario)
+		canonical := manifest.CanonicalJSON()
+		if len(canonical) == 0 || !json.Valid(canonical) {
+			t.Fatalf("scenario %s has no valid canonical artifact", scenario)
+		}
+		sum := sha256.Sum256(canonical)
+		if got := "sha256:" + hex.EncodeToString(sum[:]); got != firstDigest {
+			t.Fatalf("scenario %s canonical artifact digest=%s, registry=%s", scenario, got, firstDigest)
 		}
 	}
 }
@@ -180,11 +192,11 @@ func TestCanonicalDigestTreatsReasonAndDependencyListsAsSets(t *testing.T) {
 
 	normalizeManifest(&first)
 	normalizeManifest(&second)
-	firstDigest, err := canonicalDigest(first)
+	_, firstDigest, err := canonicalManifest(first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondDigest, err := canonicalDigest(second)
+	_, secondDigest, err := canonicalManifest(second)
 	if err != nil {
 		t.Fatal(err)
 	}

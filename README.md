@@ -101,8 +101,9 @@ see [`docs/architecture.md`](docs/architecture.md) for the full diagram and
   expiring roots.
 - Prometheus/Grafana/Alertmanager wired end-to-end, including a working
   alert path even without a real Slack workspace.
-- Optional Wazuh decoder/rule assets for Vault audit events, with a CI
-  `wazuh-logtest` fixture gate for the certificate-revocation rule.
+- Optional Wazuh decoder/rule assets for Vault audit events, with both a CI
+  `wazuh-logtest` fixture gate and `make wazuh-live-test` to prove the live
+  Vault audit file is tailed into the manager and produces an alert.
 - A CI pipeline that gates on security *properties* (an integration test
   that asserts oracle status and scenario contracts), a live Terraform-plan
   OPA gate, not only lint.
@@ -153,7 +154,24 @@ When the key is mounted at `/run/attestation/` for the probe process,
 `demo-revoke` writes `last-cycle.attestation.json` and verifies it using the
 public key. A standalone process can produce the same envelope with
 `probe run --attestation-key ... --attestation-out ...`; verify it with
-`probe attest verify --public-key ... --input ...`.
+`probe attest verify --public-key ... --input ...`. Each signed report binds
+the canonical scenario digest and a canonical run-configuration digest; the
+cycle evidence directory also retains the exact `scenario.json` bytes whose
+SHA-256 is reported as `scenario_digest`.
+
+
+### Live Wazuh ingestion check
+
+After `make bootstrap`, start the Wazuh profile and exercise a real audited
+Vault authentication failure:
+
+```bash
+make up-wazuh
+make wazuh-live-test
+```
+
+The test requires Vault's file audit device to be active, verifies that the
+audit file grows, and then waits for Wazuh rule `100103` in `alerts.json`.
 
 ## Assurance matrix
 
@@ -161,11 +179,14 @@ Status oracles start immediately after issuer acknowledgement. Each client
 waits for the evidence boundary declared for it in the selected scenario
 manifest; the client method is not the source of that scheduling decision.
 OCSP/CRL publication boundaries fail closed: they open only after an enabled
-status oracle actually observes `REJECT / REVOKED`, never merely because its
-polling goroutine finished. The report separately records status propagation,
-staple distribution, and client enforcement timing. A result satisfies an
-explicit scenario contract; a TLS or network failure is `INCONCLUSIVE`, not a
-successful rejection.
+status oracle actually observes validated `REJECT / REVOKED`, never merely
+because its polling goroutine finished. The report separately records
+OCSP-oracle publication, CRL publication, staple-source publication, staple
+distribution, and client enforcement timing. Every result records its required
+evidence and the timestamp at which each dependency was satisfied, so a verifier
+can check that all boundaries preceded the first client attempt. A result
+satisfies an explicit scenario contract; a TLS or network failure is
+`INCONCLUSIVE`, not a successful rejection.
 
 | Profile | Role | Method | `revoked_staple` contract |
 |---|---|---|---|

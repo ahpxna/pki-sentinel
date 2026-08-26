@@ -6,10 +6,13 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,23 +46,28 @@ type Runner struct {
 	// EvidenceDir holds raw command and status artifacts referenced by the
 	// signed report. It must be durable and access-controlled in deployment.
 	EvidenceDir string
+	// ExecutorURLs records the configured profile-to-executor mapping so the
+	// signed run configuration can reproduce where each implementation ran.
+	ExecutorURLs map[string]string
 }
 
 // CycleReport is the structured JSON summary of one cycle (used by
 // `probe run --once --output json` and the integration test).
 type CycleReport struct {
-	CycleID        string                     `json:"cycle_id"`
-	Scenario       profiles.Scenario          `json:"scenario"`
-	ScenarioDigest string                     `json:"scenario_digest"`
-	ConfigDigest   string                     `json:"config_digest"`
-	Valid          bool                       `json:"valid"`
-	Phase          CyclePhase                 `json:"phase"`
-	RevokeAckAt    time.Time                  `json:"revoke_ack_at"`
-	Timeline       Timeline                   `json:"timeline"`
-	Artifacts      []profiles.Artifact        `json:"artifacts,omitempty"`
-	Preflight      []profiles.PreflightResult `json:"preflight,omitempty"`
-	Results        []profiles.Result          `json:"results"`
-	Error          string                     `json:"error,omitempty"`
+	CycleID          string                     `json:"cycle_id"`
+	Scenario         profiles.Scenario          `json:"scenario"`
+	ScenarioDigest   string                     `json:"scenario_digest"`
+	RunConfig        RunConfigSnapshot          `json:"run_config"`
+	RunConfigDigest  string                     `json:"run_config_digest"`
+	IssuedLeafSHA256 string                     `json:"issued_leaf_sha256"`
+	Valid            bool                       `json:"valid"`
+	Phase            CyclePhase                 `json:"phase"`
+	RevokeAckAt      time.Time                  `json:"revoke_ack_at"`
+	Timeline         Timeline                   `json:"timeline"`
+	Artifacts        []profiles.Artifact        `json:"artifacts,omitempty"`
+	Preflight        []profiles.PreflightResult `json:"preflight,omitempty"`
+	Results          []profiles.Result          `json:"results"`
+	Error            string                     `json:"error,omitempty"`
 }
 
 // CyclePhase records the last experiment boundary reached by a cycle. Failed
@@ -96,14 +104,23 @@ func (r *CycleReport) CanonicalJSON() ([]byte, error) {
 // Timeline preserves measurement boundaries instead of overloading one
 // end-to-end latency with OCSP propagation, CRL publication, and client work.
 type Timeline struct {
-	RevokeRequestAt           time.Time     `json:"revoke_request_at,omitempty"`
-	RevokeAckAt               time.Time     `json:"revoke_ack_at,omitempty"`
-	OCSPFirstRevoked          time.Time     `json:"ocsp_first_revoked_at,omitempty"`
-	CRLFirstRevoked           time.Time     `json:"crl_first_revoked_at,omitempty"`
-	StaplePublished           time.Time     `json:"staple_published_at,omitempty"`
-	OCSPPropagationLatency    time.Duration `json:"ocsp_propagation_latency_ns,omitempty"`
-	CRLPropagationLatency     time.Duration `json:"crl_propagation_latency_ns,omitempty"`
-	StapleDistributionLatency time.Duration `json:"staple_distribution_latency_ns,omitempty"`
+	RevokeRequestAt                time.Time     `json:"revoke_request_at,omitempty"`
+	RevokeAckAt                    time.Time     `json:"revoke_ack_at,omitempty"`
+	OCSPOracleFirstRevokedAt       time.Time     `json:"ocsp_oracle_first_revoked_at,omitempty"`
+	CRLOracleFirstRevokedAt        time.Time     `json:"crl_oracle_first_revoked_at,omitempty"`
+	StapleSourceFirstRevokedAt     time.Time     `json:"staple_source_first_revoked_at,omitempty"`
+	StaplePublishedAt              time.Time     `json:"staple_published_at,omitempty"`
+	OCSPOraclePropagationLatency   time.Duration `json:"ocsp_oracle_propagation_latency_ns,omitempty"`
+	CRLOraclePropagationLatency    time.Duration `json:"crl_oracle_propagation_latency_ns,omitempty"`
+	StapleSourcePropagationLatency time.Duration `json:"staple_source_propagation_latency_ns,omitempty"`
+	StapleDistributionLatency      time.Duration `json:"staple_distribution_latency_ns,omitempty"`
+
+	revokeRequestMono            time.Time
+	revokeAckMono                time.Time
+	ocspOracleFirstRevokedMono   time.Time
+	crlOracleFirstRevokedMono    time.Time
+	stapleSourceFirstRevokedMono time.Time
+	staplePublishedMono          time.Time
 }
 
 // RunOnce executes exactly one probe cycle.
@@ -113,10 +130,6 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	}
 	if len(r.Config.EnabledNames()) == 0 {
 		return nil, fmt.Errorf("runner: at least one profile must be enabled")
-	}
-	configDigest, err := r.Config.Digest()
-	if err != nil {
-		return nil, fmt.Errorf("runner: digest config: %w", err)
 	}
 	scenario := r.Scenario
 	if scenario == "" {
@@ -133,10 +146,16 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	}
 
 	stapling := canary.StaplingMode(manifest.Stapling)
+	runConfig := r.runConfigSnapshot()
+	runConfigDigest, err := digestRunConfig(runConfig)
+	if err != nil {
+		return nil, fmt.Errorf("runner: digest run config: %w", err)
+	}
 	cycleID := uuid.NewString()
 	hostname := fmt.Sprintf("canary-%s.canary.%s", cycleID, r.Domain)
 	report := &CycleReport{
-		CycleID: cycleID, Scenario: scenario, ScenarioDigest: manifest.Digest, ConfigDigest: configDigest,
+		CycleID: cycleID, Scenario: scenario, ScenarioDigest: manifest.Digest,
+		RunConfig: runConfig, RunConfigDigest: runConfigDigest,
 		Phase: PhaseIssue, Results: []profiles.Result{},
 	}
 	fail := func(phase CyclePhase, err error) (*CycleReport, error) {
@@ -155,8 +174,9 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 
 	report.Phase = PhasePersistEvidence
 	report.Artifacts, err = r.persistCycleArtifacts(cycleID, map[string]cycleArtifact{
-		"leaf.pem":  {MediaType: "application/x-pem-file", Contents: []byte(cert.CertPEM)},
-		"chain.pem": {MediaType: "application/x-pem-file", Contents: []byte(cert.ChainPEM)},
+		"leaf.pem":      {MediaType: "application/x-pem-file", Contents: []byte(cert.CertPEM)},
+		"chain.pem":     {MediaType: "application/x-pem-file", Contents: []byte(cert.ChainPEM)},
+		"scenario.json": {MediaType: "application/json", Contents: manifest.CanonicalJSON()},
 	})
 	if err != nil {
 		metrics.CycleTotal.WithLabelValues("error").Inc()
@@ -199,6 +219,8 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	}
 	defer srv.Close()
 
+	leafDigest := sha256.Sum256(cert.Cert.Raw)
+	report.IssuedLeafSHA256 = hex.EncodeToString(leafDigest[:])
 	target := profiles.Target{
 		Host:              hostname,
 		ConnectHost:       r.CanaryConnectHost,
@@ -208,6 +230,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 		OCSPURL:           r.OCSPURL,
 		CRLURL:            r.CRLURL,
 		CertificateSerial: cert.SerialNumber,
+		IssuedLeafSHA256:  report.IssuedLeafSHA256,
 		Scenario:          scenario,
 		OCSPFreshness: profiles.OCSPFreshnessPolicy{
 			MaxClockSkew:            r.Config.OCSPFreshness.MaxClockSkew,
@@ -221,7 +244,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	// legitimately reject a missing status before revocation.
 	report.Phase = PhasePreflight
 	log.Printf("[cycle %s] pre-flight: verifying all profiles can reach the canary", cycleID)
-	preflight, preflightErr := r.preflight(ctx, target)
+	preflight, preflightObservedMono, preflightErr := r.preflight(ctx, target)
 	report.Preflight = preflight
 	if preflightErr != nil {
 		if err := r.persistPreflightEvidence(cycleID, report.Preflight); err != nil {
@@ -233,10 +256,19 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	}
 
 	// Do not put evidence I/O between a successful preflight and the revoke
-	// request. The BEFORE observation is retained in memory and persisted after
-	// post-revocation measurement so the causal guard remains temporally tight.
+	// request. Enforce an explicit age bound immediately before the issuer side
+	// effect so every signed BEFORE observation is causally adjacent to revoke.
+	revokeRequestAt := time.Now()
+	if err := validatePreflightAge(preflightObservedMono, revokeRequestAt, r.Config.PreflightMaxAge); err != nil {
+		if persistErr := r.persistPreflightEvidence(cycleID, report.Preflight); persistErr != nil {
+			metrics.CycleTotal.WithLabelValues("error").Inc()
+			return fail(PhasePersistEvidence, fmt.Errorf("runner: stale preflight (%v); persisting preflight evidence: %w", err, persistErr))
+		}
+		metrics.CycleTotal.WithLabelValues("error").Inc()
+		return fail(PhasePreflight, err)
+	}
 	report.Phase = PhaseRevoke
-	tReq, tResp, err := r.Issuer.Revoke(ctx, cert.SerialNumber)
+	tReq, tResp, err := r.Issuer.RevokeAt(ctx, cert.SerialNumber, revokeRequestAt)
 	if err != nil {
 		if persistErr := r.persistPreflightEvidence(cycleID, report.Preflight); persistErr != nil {
 			metrics.CycleTotal.WithLabelValues("error").Inc()
@@ -246,76 +278,91 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 		return fail(PhaseRevoke, fmt.Errorf("runner: revoking canary: %w", err))
 	}
 	revokeAckAt := tResp
-	report.RevokeAckAt = revokeAckAt
+	report.RevokeAckAt = revokeAckAt.UTC()
+	for i := range report.Preflight {
+		if observedAt, ok := preflightObservedMono[report.Preflight[i].Profile]; ok {
+			report.Preflight[i].AgeAtRevoke = tReq.Sub(observedAt)
+		}
+	}
 	log.Printf("[cycle %s] revoked serial=%s at %s", cycleID, cert.SerialNumber, revokeAckAt.Format(time.RFC3339))
-	timeline := Timeline{RevokeRequestAt: tReq, RevokeAckAt: revokeAckAt}
+	timeline := newTimeline(tReq, revokeAckAt)
 
-	// Status channels begin immediately after the issuer acknowledgement. They
-	// never form a global barrier for clients using a different delivery path.
+	// Status oracles start immediately after issuer acknowledgement. Publication
+	// barriers are satisfied only by successful REJECT/REVOKED evidence; merely
+	// finishing an oracle goroutine must never release a dependent client.
 	report.Phase = PhaseObserve
-	issuerAckReady := closedEvidence()
-	ocspPublishedReady := make(chan struct{})
-	crlPublishedReady := make(chan struct{})
+	issuerAckBarrier := newEvidenceBarrier()
+	issuerAckBarrier.satisfy(revokeAckAt)
+	ocspBarrier := newEvidenceBarrier()
+	crlBarrier := newEvidenceBarrier()
+	stapleBarrier := newEvidenceBarrier()
+
 	ocspDone := make(chan []profiles.Result, 1)
 	crlDone := make(chan []profiles.Result, 1)
-	var ocspPublishedErr error
-	var crlPublishedErr error
 	go func() {
 		results := r.pollMethod(ctx, profiles.MethodOCSPDirect, target, revokeAckAt)
-		ocspPublishedErr = publicationError(profiles.MethodOCSPDirect, results)
+		if at, err := publicationEvidence(profiles.MethodOCSPDirect, results); err != nil {
+			ocspBarrier.fail(err)
+		} else {
+			ocspBarrier.satisfy(at)
+		}
 		ocspDone <- results
-		close(ocspPublishedReady)
 	}()
 	go func() {
 		results := r.pollMethod(ctx, profiles.MethodCRL, target, revokeAckAt)
-		crlPublishedErr = publicationError(profiles.MethodCRL, results)
+		if at, err := publicationEvidence(profiles.MethodCRL, results); err != nil {
+			crlBarrier.fail(err)
+		} else {
+			crlBarrier.satisfy(at)
+		}
 		crlDone <- results
-		close(crlPublishedReady)
 	}()
 
-	stapleReady := make(chan struct{})
 	var stapleErr error
+	var stapleSourceRevokedAt time.Time
 	if stapling == canary.StaplingOn {
 		go func() {
-			timeline.OCSPFirstRevoked, stapleErr = r.refreshRevokedStaple(ctx, srv, cert)
-			if stapleErr == nil {
-				timeline.StaplePublished = time.Now().UTC()
+			sourceRevokedAt, publishedAt, err := r.refreshRevokedStaple(ctx, srv, cert)
+			stapleErr = err
+			stapleSourceRevokedAt = sourceRevokedAt
+			if err != nil {
+				stapleBarrier.fail(err)
+				return
 			}
-			close(stapleReady)
+			stapleBarrier.satisfy(publishedAt)
 		}()
 	} else {
-		close(stapleReady)
+		stapleBarrier.fail(fmt.Errorf("staple_published is unavailable when execution.stapling=%s", stapling))
 	}
 
-	barriers := map[scenarios.EvidenceDependency]evidenceBarrier{
-		scenarios.EvidenceIssuerAck:       {ready: issuerAckReady},
-		scenarios.EvidenceOCSPPublished:   {ready: ocspPublishedReady, err: func() error { return ocspPublishedErr }},
-		scenarios.EvidenceCRLPublished:    {ready: crlPublishedReady, err: func() error { return crlPublishedErr }},
-		scenarios.EvidenceStaplePublished: {ready: stapleReady, err: func() error { return stapleErr }},
+	barriers := map[scenarios.EvidenceDependency]*evidenceBarrier{
+		scenarios.EvidenceIssuerAck:       issuerAckBarrier,
+		scenarios.EvidenceOCSPPublished:   ocspBarrier,
+		scenarios.EvidenceCRLPublished:    crlBarrier,
+		scenarios.EvidenceStaplePublished: stapleBarrier,
 	}
 	clients := r.pollClients(ctx, target, revokeAckAt, barriers)
 	oracles := append(<-ocspDone, <-crlDone...)
-	// Reporting waits for the staple publisher to finish. The manifest decides
-	// which client profiles wait on this boundary; this wait establishes a
-	// happens-before edge for timeline data in every selected scenario.
 	if stapling == canary.StaplingOn {
-		<-stapleReady
+		<-stapleBarrier.ready
 	}
-	for _, result := range oracles {
-		if result.Method == profiles.MethodOCSPDirect && result.Decision == profiles.DecisionReject && result.Reason == profiles.ReasonRevoked {
-			timeline.OCSPFirstRevoked = earliest(timeline.OCSPFirstRevoked, result.DecisionAt)
-		}
-		if result.Method == profiles.MethodCRL && result.Decision == profiles.DecisionReject && result.Reason == profiles.ReasonRevoked {
-			timeline.CRLFirstRevoked = earliest(timeline.CRLFirstRevoked, result.DecisionAt)
-		}
+	if at, err := ocspBarrier.state(); err == nil {
+		timeline.setOCSPOracleRevoked(at)
+	}
+	if at, err := crlBarrier.state(); err == nil {
+		timeline.setCRLOracleRevoked(at)
+	}
+	if at, err := stapleBarrier.state(); err == nil {
+		timeline.setStapleSourceRevoked(stapleSourceRevokedAt)
+		timeline.setStaplePublished(at)
 	}
 
 	results := append(oracles, clients...)
 	sortResults(results)
 	timeline.derive()
 	for i := range results {
-		if r.dependsOn(results[i].Scenario, results[i].Profile, scenarios.EvidenceStaplePublished) && !timeline.StaplePublished.IsZero() && !results[i].DecisionAt.IsZero() {
-			results[i].EnforcementLatency = results[i].DecisionAt.Sub(timeline.StaplePublished)
+		if r.dependsOn(results[i].Scenario, results[i].Profile, scenarios.EvidenceStaplePublished) && !timeline.staplePublishedMono.IsZero() && !results[i].DecisionAt.IsZero() {
+			results[i].EnforcementLatency = results[i].DecisionAt.Sub(timeline.staplePublishedMono)
 		}
 	}
 	report.Timeline = timeline
@@ -366,28 +413,6 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 	return report, nil
 }
 
-func publicationError(method profiles.CheckMethod, results []profiles.Result) error {
-	if len(results) == 0 {
-		return fmt.Errorf("no enabled %s status oracle produced publication evidence", method)
-	}
-	published := false
-	for _, result := range results {
-		if result.Decision == profiles.DecisionHarnessError || result.Err != "" {
-			if result.Err != "" {
-				return fmt.Errorf("status oracle %s failed while establishing %s publication: %s", result.Profile, method, result.Err)
-			}
-			return fmt.Errorf("status oracle %s failed while establishing %s publication", result.Profile, method)
-		}
-		if result.ExpectationMet && result.Decision == profiles.DecisionReject && result.Reason == profiles.ReasonRevoked {
-			published = true
-		}
-	}
-	if !published {
-		return fmt.Errorf("%s publication was not established as REJECT/REVOKED", method)
-	}
-	return nil
-}
-
 func sortResults(results []profiles.Result) {
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].Profile != results[j].Profile {
@@ -400,21 +425,72 @@ func sortResults(results []profiles.Result) {
 	})
 }
 
-func (t *Timeline) derive() {
-	if !t.RevokeAckAt.IsZero() {
-		if !t.OCSPFirstRevoked.IsZero() {
-			t.OCSPPropagationLatency = t.OCSPFirstRevoked.Sub(t.RevokeAckAt)
-		}
-		if !t.CRLFirstRevoked.IsZero() {
-			t.CRLPropagationLatency = t.CRLFirstRevoked.Sub(t.RevokeAckAt)
-		}
-		if !t.StaplePublished.IsZero() {
-			t.StapleDistributionLatency = t.StaplePublished.Sub(t.RevokeAckAt)
-		}
+func newTimeline(revokeRequestAt, revokeAckAt time.Time) Timeline {
+	return Timeline{
+		RevokeRequestAt: revokeRequestAt.UTC(), RevokeAckAt: revokeAckAt.UTC(),
+		revokeRequestMono: revokeRequestAt, revokeAckMono: revokeAckAt,
 	}
 }
 
-func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, cert *issuer.CanaryCert) (time.Time, error) {
+func (t *Timeline) setOCSPOracleRevoked(at time.Time) {
+	t.ocspOracleFirstRevokedMono = earliest(t.ocspOracleFirstRevokedMono, at)
+	t.OCSPOracleFirstRevokedAt = t.ocspOracleFirstRevokedMono.UTC()
+}
+
+func (t *Timeline) setCRLOracleRevoked(at time.Time) {
+	t.crlOracleFirstRevokedMono = earliest(t.crlOracleFirstRevokedMono, at)
+	t.CRLOracleFirstRevokedAt = t.crlOracleFirstRevokedMono.UTC()
+}
+
+func (t *Timeline) setStapleSourceRevoked(at time.Time) {
+	t.stapleSourceFirstRevokedMono = earliest(t.stapleSourceFirstRevokedMono, at)
+	t.StapleSourceFirstRevokedAt = t.stapleSourceFirstRevokedMono.UTC()
+}
+
+func (t *Timeline) setStaplePublished(at time.Time) {
+	t.staplePublishedMono = earliest(t.staplePublishedMono, at)
+	t.StaplePublishedAt = t.staplePublishedMono.UTC()
+}
+
+func (t *Timeline) derive() {
+	ack := t.revokeAckMono
+	if ack.IsZero() {
+		ack = t.RevokeAckAt
+	}
+	if ack.IsZero() {
+		return
+	}
+	ocspAt := t.ocspOracleFirstRevokedMono
+	if ocspAt.IsZero() {
+		ocspAt = t.OCSPOracleFirstRevokedAt
+	}
+	crlAt := t.crlOracleFirstRevokedMono
+	if crlAt.IsZero() {
+		crlAt = t.CRLOracleFirstRevokedAt
+	}
+	stapleSourceAt := t.stapleSourceFirstRevokedMono
+	if stapleSourceAt.IsZero() {
+		stapleSourceAt = t.StapleSourceFirstRevokedAt
+	}
+	staplePublishedAt := t.staplePublishedMono
+	if staplePublishedAt.IsZero() {
+		staplePublishedAt = t.StaplePublishedAt
+	}
+	if !ocspAt.IsZero() {
+		t.OCSPOraclePropagationLatency = ocspAt.Sub(ack)
+	}
+	if !crlAt.IsZero() {
+		t.CRLOraclePropagationLatency = crlAt.Sub(ack)
+	}
+	if !stapleSourceAt.IsZero() {
+		t.StapleSourcePropagationLatency = stapleSourceAt.Sub(ack)
+	}
+	if !stapleSourceAt.IsZero() && !staplePublishedAt.IsZero() {
+		t.StapleDistributionLatency = staplePublishedAt.Sub(stapleSourceAt)
+	}
+}
+
+func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, cert *issuer.CanaryCert) (time.Time, time.Time, error) {
 	deadline := time.Now().Add(r.Config.MaxWait)
 	var lastErr error
 	var lastStatus int
@@ -422,9 +498,9 @@ func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, c
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			if lastErr != nil {
-				return time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: %w", lastErr)
+				return time.Time{}, time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: %w", lastErr)
 			}
-			return time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: last status=%d", lastStatus)
+			return time.Time{}, time.Time{}, fmt.Errorf("runner: waiting for revoked OCSP staple: last status=%d", lastStatus)
 		}
 		attemptTimeout := 5 * time.Second
 		if remaining < attemptTimeout {
@@ -435,8 +511,10 @@ func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, c
 		cancel()
 		lastErr, lastStatus = err, status
 		if err == nil && status == ocsp.Revoked {
+			sourceRevokedAt := time.Now()
 			srv.SetOCSPStaple(staple)
-			return time.Now().UTC(), nil
+			publishedAt := time.Now()
+			return sourceRevokedAt, publishedAt, nil
 		}
 
 		sleepFor := r.Config.PollInterval
@@ -455,7 +533,7 @@ func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, c
 				default:
 				}
 			}
-			return time.Time{}, ctx.Err()
+			return time.Time{}, time.Time{}, ctx.Err()
 		case <-timer.C:
 		}
 	}
@@ -471,49 +549,91 @@ func earliest(current, candidate time.Time) time.Time {
 // preflight runs every enabled profile once before revocation and validates
 // its scenario-specific contract. A strict stapling client is expected to
 // reject a missing staple even when the certificate itself is still good.
-func (r *Runner) preflight(ctx context.Context, target profiles.Target) ([]profiles.PreflightResult, error) {
-	results := make([]profiles.PreflightResult, 0, len(r.Profiles))
-	for _, p := range r.Profiles {
-		if !r.Config.IsEnabled(p.Name) {
-			continue
-		}
-		contract, ok := r.Scenarios.Contract(target.Scenario, p.Name)
-		if !ok {
-			return results, fmt.Errorf("preflight: profile %s has no expectation for scenario %s", p.Name, target.Scenario)
-		}
-		expectation := contract.Baseline
-		pctx, cancel := context.WithTimeout(ctx, r.Config.TimeoutFor(p.Name))
-		observation, err := p.Probe(pctx, target)
-		cancel()
-		observedAt := time.Now().UTC()
-		if err != nil {
-			observation.Decision = profiles.DecisionHarnessError
-			observation.Reason = profiles.ReasonHarnessFailure
-		}
-		result := profiles.PreflightResult{
-			Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario,
-			Decision: observation.Decision, Reason: observation.Reason,
-			ExpectedDecision: expectation.Before, ExpectedReasons: expectation.BeforeReasons,
-			ExpectationMet: expectation.MatchesBefore(observation), ObservedAt: observedAt, Evidence: observation.Evidence,
-		}
-		if err != nil {
-			result.Err = err.Error()
-		}
-		results = append(results, result)
-		if err != nil {
-			return results, fmt.Errorf("preflight: profile %s errored: %w", p.Name, err)
-		}
-		if !result.ExpectationMet {
-			return results, fmt.Errorf("preflight: profile %s produced %s/%s, expected %s/%v for scenario %s", p.Name, observation.Decision, observation.Reason, expectation.Before, expectation.BeforeReasons, target.Scenario)
+func (r *Runner) preflight(ctx context.Context, target profiles.Target) ([]profiles.PreflightResult, map[string]time.Time, error) {
+	type outcome struct {
+		result       profiles.PreflightResult
+		observedMono time.Time
+		probeErr     error
+	}
+
+	enabled := make([]profiles.Profile, 0, len(r.Profiles))
+	for _, profile := range r.Profiles {
+		if r.Config.IsEnabled(profile.Name) {
+			enabled = append(enabled, profile)
 		}
 	}
+	outcomes := make(chan outcome, len(enabled))
+	var wg sync.WaitGroup
+	for _, p := range enabled {
+		contract, ok := r.Scenarios.Contract(target.Scenario, p.Name)
+		if !ok {
+			return nil, nil, fmt.Errorf("preflight: profile %s has no expectation for scenario %s", p.Name, target.Scenario)
+		}
+		expectation := contract.Baseline
+		wg.Add(1)
+		go func(p profiles.Profile, expectation profiles.Expectation) {
+			defer wg.Done()
+			pctx, cancel := context.WithTimeout(ctx, r.Config.TimeoutFor(p.Name))
+			observation, err := p.Probe(pctx, target)
+			cancel()
+			observedMono := time.Now()
+			if err != nil {
+				observation.Decision = profiles.DecisionHarnessError
+				observation.Reason = profiles.ReasonHarnessFailure
+			}
+			result := profiles.PreflightResult{
+				Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario,
+				Decision: observation.Decision, Reason: observation.Reason,
+				ExpectedDecision: expectation.Before, ExpectedReasons: expectation.BeforeReasons,
+				ExpectationMet: expectation.MatchesBefore(observation), ObservedAt: observedMono.UTC(), Evidence: observation.Evidence,
+			}
+			if err != nil {
+				result.Err = err.Error()
+			}
+			outcomes <- outcome{result: result, observedMono: observedMono, probeErr: err}
+		}(p, expectation)
+	}
+	wg.Wait()
+	close(outcomes)
+
+	results := make([]profiles.PreflightResult, 0, len(enabled))
+	observed := make(map[string]time.Time, len(enabled))
+	probeErrors := make(map[string]error, len(enabled))
+	for item := range outcomes {
+		results = append(results, item.result)
+		observed[item.result.Profile] = item.observedMono
+		probeErrors[item.result.Profile] = item.probeErr
+	}
 	sort.Slice(results, func(i, j int) bool { return results[i].Profile < results[j].Profile })
-	return results, nil
+	for _, result := range results {
+		if err := probeErrors[result.Profile]; err != nil {
+			return results, observed, fmt.Errorf("preflight: profile %s errored: %w", result.Profile, err)
+		}
+		if !result.ExpectationMet {
+			return results, observed, fmt.Errorf("preflight: profile %s produced %s/%s, expected %s/%v for scenario %s", result.Profile, result.Decision, result.Reason, result.ExpectedDecision, result.ExpectedReasons, target.Scenario)
+		}
+	}
+	return results, observed, nil
+}
+
+func validatePreflightAge(observed map[string]time.Time, now time.Time, maxAge time.Duration) error {
+	if maxAge <= 0 {
+		return fmt.Errorf("preflight: max age must be positive")
+	}
+	for profile, at := range observed {
+		if at.IsZero() {
+			return fmt.Errorf("preflight: profile %s has no observation timestamp", profile)
+		}
+		if age := now.Sub(at); age > maxAge {
+			return fmt.Errorf("preflight: profile %s observation is %s old, exceeds %s", profile, age, maxAge)
+		}
+	}
+	return nil
 }
 
 // pollClients waits only on the manifest-declared evidence boundaries for a
 // profile. The implementation method does not imply a wait condition.
-func (r *Runner) pollClients(ctx context.Context, target profiles.Target, revokedAt time.Time, barriers map[scenarios.EvidenceDependency]evidenceBarrier) []profiles.Result {
+func (r *Runner) pollClients(ctx context.Context, target profiles.Target, revokedAt time.Time, barriers map[scenarios.EvidenceDependency]*evidenceBarrier) []profiles.Result {
 	var wg sync.WaitGroup
 	results := make([]profiles.Result, 0, len(r.Profiles))
 	var mu sync.Mutex
@@ -524,13 +644,18 @@ func (r *Runner) pollClients(ctx context.Context, target profiles.Target, revoke
 		wg.Add(1)
 		go func(p profiles.Profile) {
 			defer wg.Done()
-			if err := r.waitForEvidence(ctx, target.Scenario, p.Name, barriers); err != nil {
+			required, _ := r.Scenarios.Dependencies(target.Scenario, p.Name)
+			requiredNames := evidenceDependencyNames(required)
+			satisfiedAt, err := r.waitForEvidence(ctx, target.Scenario, p.Name, barriers)
+			if err != nil {
 				mu.Lock()
-				results = append(results, r.harnessResult(p, target, revokedAt, err))
+				results = append(results, r.harnessResult(p, target, revokedAt, requiredNames, satisfiedAt, err))
 				mu.Unlock()
 				return
 			}
 			result := r.pollOne(ctx, p, target, revokedAt)
+			result.RequiredEvidence = requiredNames
+			result.EvidenceSatisfiedAt = satisfiedAt
 			mu.Lock()
 			results = append(results, result)
 			mu.Unlock()
@@ -541,38 +666,98 @@ func (r *Runner) pollClients(ctx context.Context, target profiles.Target, revoke
 }
 
 type evidenceBarrier struct {
-	ready <-chan struct{}
-	err   func() error
+	ready chan struct{}
+	once  sync.Once
+	mu    sync.RWMutex
+	at    time.Time
+	err   error
 }
 
-func closedEvidence() <-chan struct{} {
-	ready := make(chan struct{})
-	close(ready)
-	return ready
+func newEvidenceBarrier() *evidenceBarrier {
+	return &evidenceBarrier{ready: make(chan struct{})}
 }
 
-func (r *Runner) waitForEvidence(ctx context.Context, scenario profiles.Scenario, profile string, barriers map[scenarios.EvidenceDependency]evidenceBarrier) error {
+func (b *evidenceBarrier) satisfy(at time.Time) {
+	b.once.Do(func() {
+		b.mu.Lock()
+		b.at = at
+		b.mu.Unlock()
+		close(b.ready)
+	})
+}
+
+func (b *evidenceBarrier) fail(err error) {
+	if err == nil {
+		err = fmt.Errorf("evidence dependency was not satisfied")
+	}
+	b.once.Do(func() {
+		b.mu.Lock()
+		b.err = err
+		b.mu.Unlock()
+		close(b.ready)
+	})
+}
+
+func (b *evidenceBarrier) state() (time.Time, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.at, b.err
+}
+
+func evidenceDependencyNames(values []scenarios.EvidenceDependency) []string {
+	result := make([]string, len(values))
+	for i, value := range values {
+		result[i] = string(value)
+	}
+	return result
+}
+
+func (r *Runner) waitForEvidence(ctx context.Context, scenario profiles.Scenario, profile string, barriers map[scenarios.EvidenceDependency]*evidenceBarrier) (map[string]time.Time, error) {
 	dependencies, ok := r.Scenarios.Dependencies(scenario, profile)
 	if !ok {
-		return fmt.Errorf("profile %s has no evidence dependencies for scenario %s", profile, scenario)
+		return nil, fmt.Errorf("profile %s has no evidence dependencies for scenario %s", profile, scenario)
 	}
+	satisfied := make(map[string]time.Time, len(dependencies))
 	for _, dependency := range dependencies {
 		barrier, ok := barriers[dependency]
-		if !ok || barrier.ready == nil {
-			return fmt.Errorf("profile %s requires unavailable evidence dependency %s", profile, dependency)
+		if !ok || barrier == nil || barrier.ready == nil {
+			return satisfied, fmt.Errorf("profile %s requires unavailable evidence dependency %s", profile, dependency)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return satisfied, ctx.Err()
 		case <-barrier.ready:
 		}
-		if barrier.err != nil {
-			if err := barrier.err(); err != nil {
-				return fmt.Errorf("profile %s waiting for %s: %w", profile, dependency, err)
-			}
+		at, err := barrier.state()
+		if err != nil {
+			return satisfied, fmt.Errorf("profile %s waiting for %s: %w", profile, dependency, err)
 		}
+		if at.IsZero() {
+			return satisfied, fmt.Errorf("profile %s waiting for %s: dependency closed without a satisfaction timestamp", profile, dependency)
+		}
+		satisfied[string(dependency)] = at.UTC()
 	}
-	return nil
+	return satisfied, nil
+}
+
+func publicationEvidence(method profiles.CheckMethod, results []profiles.Result) (time.Time, error) {
+	if len(results) == 0 {
+		return time.Time{}, fmt.Errorf("%s publication has no enabled status oracle", method)
+	}
+	var first time.Time
+	var failures []string
+	for _, result := range results {
+		if result.Decision == profiles.DecisionReject && result.Reason == profiles.ReasonRevoked && !result.DecisionAt.IsZero() {
+			first = earliest(first, result.DecisionAt)
+			continue
+		}
+		failures = append(failures, fmt.Sprintf("%s=%s/%s expectation_met=%t error=%q", result.Profile, result.Decision, result.Reason, result.ExpectationMet, result.Err))
+	}
+	if !first.IsZero() {
+		return first, nil
+	}
+	sort.Strings(failures)
+	return time.Time{}, fmt.Errorf("%s publication was not confirmed: %s", method, strings.Join(failures, "; "))
 }
 
 func (r *Runner) dependsOn(scenario profiles.Scenario, profile string, dependency scenarios.EvidenceDependency) bool {
@@ -588,10 +773,16 @@ func (r *Runner) dependsOn(scenario profiles.Scenario, profile string, dependenc
 	return false
 }
 
-func (r *Runner) harnessResult(p profiles.Profile, target profiles.Target, revokedAt time.Time, err error) profiles.Result {
+func (r *Runner) harnessResult(p profiles.Profile, target profiles.Target, revokedAt time.Time, required []string, satisfied map[string]time.Time, err error) profiles.Result {
 	contract, _ := r.Scenarios.Contract(target.Scenario, p.Name)
 	expectation := contract.Baseline
-	return profiles.Result{Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario, Decision: profiles.DecisionHarnessError, Reason: profiles.ReasonHarnessFailure, ExpectedDecision: expectation.After, ExpectedReasons: expectation.AfterReasons, CertificateSerial: target.CertificateSerial, RevokeAckAt: revokedAt, Err: err.Error()}
+	return profiles.Result{
+		Profile: p.Name, Role: p.Role, Method: p.Method, Scenario: target.Scenario,
+		Decision: profiles.DecisionHarnessError, Reason: profiles.ReasonHarnessFailure,
+		ExpectedDecision: expectation.After, ExpectedReasons: expectation.AfterReasons,
+		CertificateSerial: target.CertificateSerial, RevokeAckAt: revokedAt.UTC(),
+		RequiredEvidence: required, EvidenceSatisfiedAt: satisfied, Err: err.Error(),
+	}
 }
 
 func (r *Runner) pollMethod(ctx context.Context, method profiles.CheckMethod, target profiles.Target, revokedAt time.Time) []profiles.Result {
@@ -607,6 +798,9 @@ func (r *Runner) pollMethod(ctx context.Context, method profiles.CheckMethod, ta
 		go func(p profiles.Profile) {
 			defer wg.Done()
 			res := r.pollOne(ctx, p, target, revokedAt)
+			dependencies, _ := r.Scenarios.Dependencies(target.Scenario, p.Name)
+			res.RequiredEvidence = evidenceDependencyNames(dependencies)
+			res.EvidenceSatisfiedAt = map[string]time.Time{string(scenarios.EvidenceIssuerAck): revokedAt.UTC()}
 			mu.Lock()
 			results = append(results, res)
 			mu.Unlock()

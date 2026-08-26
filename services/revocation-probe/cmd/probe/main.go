@@ -60,7 +60,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
 	probe run   [--once] [--config profiles.yaml] [--scenario <id>] [--output json]
-  probe check --profile <name> --target <https://host:port> --ca <chain.pem> [--ocsp-url URL] [--crl-url URL]
+  probe check --profile <name> --target <https://host:port> --ca <chain.pem> [--leaf-sha256 HEX] [--ocsp-url URL] [--crl-url URL]
   probe chaos sweep [--delays 0,1000,2000] [--trials 5] [--out path.csv]
   probe attest verify --public-key attestation.pub --input cycle.attestation.json
   probe executor --profile <name> [--listen :8120]`)
@@ -173,6 +173,7 @@ func cmdRun(args []string) {
 		CanaryBindHost:    env("PROBE_CANARY_BIND_HOST", ""),
 		CanaryConnectHost: env("PROBE_CANARY_CONNECT_HOST", ""),
 		EvidenceDir:       env("EVIDENCE_DIR", "/var/lib/pki-sentinel/evidence"),
+		ExecutorURLs:      profileURLs,
 	}
 
 	runCycle := func() error {
@@ -288,6 +289,7 @@ func cmdCheck(args []string) {
 	caPath := fs.String("ca", "", "path to CA chain PEM")
 	ocspURL := fs.String("ocsp-url", "", "OCSP responder URL required by direct OCSP profiles")
 	crlURL := fs.String("crl-url", "", "CRL URL required by CRL profiles")
+	leafSHA256 := fs.String("leaf-sha256", "", "expected SHA-256 of the exact leaf DER (required by status-oracle profiles)")
 	_ = fs.Parse(args)
 
 	if *profileName == "" || *target == "" || *caPath == "" {
@@ -326,9 +328,12 @@ func cmdCheck(args []string) {
 	if found.Method == profiles.MethodCRL && *crlURL == "" {
 		log.Fatal("check: --crl-url is required for a CRL profile")
 	}
+	if found.Role == profiles.RoleStatusOracle && *leafSHA256 == "" {
+		log.Fatal("check: --leaf-sha256 is required for a status-oracle profile so the observation is bound to the intended certificate")
+	}
 	t := profiles.Target{
 		Host: host, Port: port, CAChainPEM: string(caPEM), IssuerPEM: string(caPEM),
-		OCSPURL: *ocspURL, CRLURL: *crlURL, Scenario: profiles.Scenario("standalone_check"),
+		OCSPURL: *ocspURL, CRLURL: *crlURL, IssuedLeafSHA256: *leafSHA256, Scenario: profiles.Scenario("standalone_check"),
 	}
 	observation, err := found.Probe(ctx, t)
 	if err != nil {
@@ -464,7 +469,7 @@ func cmdChaos(args []string) {
 	if err != nil {
 		log.Fatalf("chaos sweep: vault login: %v", err)
 	}
-	cfg := &config.Config{PollInterval: 2 * time.Second, MaxWait: 30 * time.Second}
+	cfg := &config.Config{PollInterval: 2 * time.Second, MaxWait: 30 * time.Second, MaxAttempts: 15, PreflightMaxAge: 2 * time.Second, OCSPFreshness: config.OCSPFreshnessConfig{MaxClockSkew: 5 * time.Minute, RequireNextUpdate: true, MaxAgeWithoutNextUpdate: time.Hour}}
 	for _, p := range profiles.Registry() {
 		if p.Name == "openssl-ocsp-direct" {
 			cfg.Profiles = append(cfg.Profiles, config.ProfileConfig{Name: p.Name, Enabled: true})

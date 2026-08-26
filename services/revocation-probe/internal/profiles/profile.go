@@ -76,6 +76,7 @@ type Target struct {
 	OCSPURL           string
 	CRLURL            string
 	CertificateSerial string
+	IssuedLeafSHA256  string // hex SHA-256 of the exact issued leaf DER
 	Scenario          Scenario
 	OCSPFreshness     OCSPFreshnessPolicy
 }
@@ -117,15 +118,16 @@ type RawArtifact struct {
 // CommandEvidence preserves enough subprocess evidence for independent
 // diagnosis without putting unbounded certificate identifiers into metrics.
 type CommandEvidence struct {
-	Client        string        `json:"client,omitempty"`
-	Executor      string        `json:"executor,omitempty"`
-	ClientVersion string        `json:"client_version,omitempty"`
-	TLSBackend    string        `json:"tls_backend,omitempty"`
-	ExitCode      *int          `json:"exit_code,omitempty"`
-	StdoutSHA256  string        `json:"stdout_sha256,omitempty"`
-	StderrSHA256  string        `json:"stderr_sha256,omitempty"`
-	Artifacts     []Artifact    `json:"artifacts,omitempty"`
-	RawArtifacts  []RawArtifact `json:"raw_artifacts,omitempty"`
+	Client              string        `json:"client,omitempty"`
+	Executor            string        `json:"executor,omitempty"`
+	ClientVersion       string        `json:"client_version,omitempty"`
+	TLSBackend          string        `json:"tls_backend,omitempty"`
+	PresentedLeafSHA256 string        `json:"presented_leaf_sha256,omitempty"`
+	ExitCode            *int          `json:"exit_code,omitempty"`
+	StdoutSHA256        string        `json:"stdout_sha256,omitempty"`
+	StderrSHA256        string        `json:"stderr_sha256,omitempty"`
+	Artifacts           []Artifact    `json:"artifacts,omitempty"`
+	RawArtifacts        []RawArtifact `json:"raw_artifacts,omitempty"`
 }
 
 // Observation is returned by one oracle or client execution attempt.
@@ -151,6 +153,7 @@ type PreflightResult struct {
 	ExpectedReasons  []Reason        `json:"expected_reasons,omitempty"`
 	ExpectationMet   bool            `json:"expectation_met"`
 	ObservedAt       time.Time       `json:"observed_at"`
+	AgeAtRevoke      time.Duration   `json:"age_at_revoke_ns,omitempty"`
 	Evidence         CommandEvidence `json:"evidence,omitempty"`
 	Err              string          `json:"error,omitempty"`
 }
@@ -198,23 +201,25 @@ type Profile struct {
 
 // Result is the durable evidence record for one profile in one cycle.
 type Result struct {
-	Profile           string        `json:"profile"`
-	Role              Role          `json:"role"`
-	Method            CheckMethod   `json:"method"`
-	Scenario          Scenario      `json:"scenario"`
-	Decision          Decision      `json:"decision"`
-	Reason            Reason        `json:"reason"`
-	ExpectedDecision  Decision      `json:"expected_decision"`
-	ExpectedReasons   []Reason      `json:"expected_reasons,omitempty"`
-	ExpectationMet    bool          `json:"expectation_met"`
-	PolicyDecision    Decision      `json:"policy_decision,omitempty"`
-	PolicyReasons     []Reason      `json:"policy_reasons,omitempty"`
-	PolicyMet         bool          `json:"policy_met"`
-	CertificateSerial string        `json:"certificate_serial"`
-	RevokeAckAt       time.Time     `json:"revoke_ack_at"`
-	DecisionAt        time.Time     `json:"decision_at,omitempty"`
-	ClientAttemptAt   time.Time     `json:"client_attempt_at,omitempty"`
-	DecisionLatency   time.Duration `json:"decision_latency_ns,omitempty"`
+	Profile             string               `json:"profile"`
+	Role                Role                 `json:"role"`
+	Method              CheckMethod          `json:"method"`
+	Scenario            Scenario             `json:"scenario"`
+	Decision            Decision             `json:"decision"`
+	Reason              Reason               `json:"reason"`
+	ExpectedDecision    Decision             `json:"expected_decision"`
+	ExpectedReasons     []Reason             `json:"expected_reasons,omitempty"`
+	ExpectationMet      bool                 `json:"expectation_met"`
+	PolicyDecision      Decision             `json:"policy_decision,omitempty"`
+	PolicyReasons       []Reason             `json:"policy_reasons,omitempty"`
+	PolicyMet           bool                 `json:"policy_met"`
+	CertificateSerial   string               `json:"certificate_serial"`
+	RevokeAckAt         time.Time            `json:"revoke_ack_at"`
+	DecisionAt          time.Time            `json:"decision_at,omitempty"`
+	ClientAttemptAt     time.Time            `json:"client_attempt_at,omitempty"`
+	RequiredEvidence    []string             `json:"required_evidence,omitempty"`
+	EvidenceSatisfiedAt map[string]time.Time `json:"evidence_satisfied_at,omitempty"`
+	DecisionLatency     time.Duration        `json:"decision_latency_ns,omitempty"`
 	// EnforcementLatency is populated only where a client depends on an
 	// explicitly published evidence artifact (currently a revoked OCSP staple).
 	// It is not interchangeable with DecisionLatency, which starts at issuer

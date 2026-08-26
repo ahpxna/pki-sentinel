@@ -213,11 +213,20 @@ func pemStrings(value interface{}) []string {
 // revocation timestamp rather than the moment the client issued the
 // request.
 func (c *Client) Revoke(ctx context.Context, serial string) (tRequest, tResponse time.Time, err error) {
-	tRequest = time.Now()
-	_, err = c.API.Logical().WriteWithContext(ctx, "pki_int/revoke", map[string]interface{}{
+	return c.RevokeAt(ctx, serial, time.Now())
+}
+
+// RevokeAt performs the revoke while preserving a caller-captured monotonic
+// request boundary. The runner uses this to validate preflight age at exactly
+// the timestamp that becomes t_request in the signed experiment timeline.
+func (c *Client) RevokeAt(ctx context.Context, serial string, tRequest time.Time) (time.Time, time.Time, error) {
+	if tRequest.IsZero() {
+		tRequest = time.Now()
+	}
+	_, err := c.API.Logical().WriteWithContext(ctx, "pki_int/revoke", map[string]interface{}{
 		"serial_number": serial,
 	})
-	tResponse = time.Now()
+	tResponse := time.Now()
 	if err != nil {
 		return tRequest, tResponse, fmt.Errorf("issuer: revoke %s: %w", serial, err)
 	}

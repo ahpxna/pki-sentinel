@@ -28,7 +28,7 @@ type Statement struct {
 	IssuedAt        time.Time `json:"issued_at"`
 	RunID           string    `json:"run_id"`
 	ScenarioDigest  string    `json:"scenario_digest"`
-	ConfigDigest    string    `json:"config_digest"`
+	RunConfigDigest string    `json:"run_config_digest"`
 	PayloadSHA256   string    `json:"payload_sha256"`
 	PublicKeySHA256 string    `json:"public_key_sha256"`
 }
@@ -100,7 +100,7 @@ func SignJSON(privateKeyPEM []byte, payloadJSON []byte, now time.Time) (Envelope
 		IssuedAt:        now.UTC(),
 		RunID:           runID,
 		ScenarioDigest:  scenarioDigest,
-		ConfigDigest:    configDigest,
+		RunConfigDigest: configDigest,
 		PayloadSHA256:   hex.EncodeToString(payloadHash[:]),
 		PublicKeySHA256: hex.EncodeToString(publicKeyHash[:]),
 	}
@@ -137,8 +137,8 @@ func Verify(publicKeyPEM []byte, envelope Envelope) error {
 	if envelope.Statement.ScenarioDigest != scenarioDigest {
 		return fmt.Errorf("attestation scenario digest does not match payload scenario_digest")
 	}
-	if envelope.Statement.ConfigDigest != configDigest {
-		return fmt.Errorf("attestation config digest does not match payload config_digest")
+	if envelope.Statement.RunConfigDigest != configDigest {
+		return fmt.Errorf("attestation run config digest does not match payload run_config_digest")
 	}
 	publicKey, err := parsePublicKey(publicKeyPEM)
 	if err != nil {
@@ -168,9 +168,9 @@ func Verify(publicKeyPEM []byte, envelope Envelope) error {
 
 func payloadIdentity(payload json.RawMessage) (string, string, string, error) {
 	var identity struct {
-		CycleID        string `json:"cycle_id"`
-		ScenarioDigest string `json:"scenario_digest"`
-		ConfigDigest   string `json:"config_digest"`
+		CycleID         string `json:"cycle_id"`
+		ScenarioDigest  string `json:"scenario_digest"`
+		RunConfigDigest string `json:"run_config_digest"`
 	}
 	if err := json.Unmarshal(payload, &identity); err != nil {
 		return "", "", "", fmt.Errorf("decode attestation payload identity: %w", err)
@@ -181,10 +181,10 @@ func payloadIdentity(payload json.RawMessage) (string, string, string, error) {
 	if !validDigest(identity.ScenarioDigest) {
 		return "", "", "", fmt.Errorf("attestation payload scenario_digest %q is not a canonical SHA-256 digest", identity.ScenarioDigest)
 	}
-	if !validDigest(identity.ConfigDigest) {
-		return "", "", "", fmt.Errorf("attestation payload config_digest %q is not a canonical SHA-256 digest", identity.ConfigDigest)
+	if !validDigest(identity.RunConfigDigest) {
+		return "", "", "", fmt.Errorf("attestation payload run_config_digest %q is not a canonical SHA-256 digest", identity.RunConfigDigest)
 	}
-	return identity.CycleID, identity.ScenarioDigest, identity.ConfigDigest, nil
+	return identity.CycleID, identity.ScenarioDigest, identity.RunConfigDigest, nil
 }
 
 func validDigest(value string) bool {

@@ -12,6 +12,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,34 +26,45 @@ import (
 	"time"
 )
 
+type commandEvidence struct {
+	PresentedLeafSHA256 string `json:"presented_leaf_sha256"`
+}
+
 type result struct {
-	Profile          string   `json:"profile"`
-	Role             string   `json:"role"`
-	Method           string   `json:"method"`
-	Decision         string   `json:"decision"`
-	Reason           string   `json:"reason"`
-	ExpectedDecision string   `json:"expected_decision"`
-	ExpectedReasons  []string `json:"expected_reasons"`
-	ExpectationMet   bool     `json:"expectation_met"`
-	DecisionLatency  int64    `json:"decision_latency_ns"`
-	Error            string   `json:"error"`
+	Profile             string               `json:"profile"`
+	Role                string               `json:"role"`
+	Method              string               `json:"method"`
+	Decision            string               `json:"decision"`
+	Reason              string               `json:"reason"`
+	ExpectedDecision    string               `json:"expected_decision"`
+	ExpectedReasons     []string             `json:"expected_reasons"`
+	ExpectationMet      bool                 `json:"expectation_met"`
+	ObservedAt          time.Time            `json:"observed_at"`
+	AgeAtRevoke         int64                `json:"age_at_revoke_ns"`
+	ClientAttemptAt     time.Time            `json:"client_attempt_at"`
+	RequiredEvidence    []string             `json:"required_evidence"`
+	EvidenceSatisfiedAt map[string]time.Time `json:"evidence_satisfied_at"`
+	DecisionLatency     int64                `json:"decision_latency_ns"`
+	Evidence            commandEvidence      `json:"evidence"`
+	Error               string               `json:"error"`
 }
 
 type cycleReport struct {
-	CycleID        string   `json:"cycle_id"`
-	Scenario       string   `json:"scenario"`
-	ScenarioDigest string   `json:"scenario_digest"`
-	ConfigDigest   string   `json:"config_digest"`
-	Valid          bool     `json:"valid"`
-	Phase          string   `json:"phase"`
-	Preflight      []result `json:"preflight"`
-	Results        []result `json:"results"`
+	CycleID          string   `json:"cycle_id"`
+	Scenario         string   `json:"scenario"`
+	ScenarioDigest   string   `json:"scenario_digest"`
+	RunConfigDigest  string   `json:"run_config_digest"`
+	IssuedLeafSHA256 string   `json:"issued_leaf_sha256"`
+	Valid            bool     `json:"valid"`
+	Phase            string   `json:"phase"`
+	Preflight        []result `json:"preflight"`
+	Results          []result `json:"results"`
 }
 
 type attestationEnvelope struct {
 	Statement struct {
-		ScenarioDigest string `json:"scenario_digest"`
-		ConfigDigest   string `json:"config_digest"`
+		ScenarioDigest  string `json:"scenario_digest"`
+		RunConfigDigest string `json:"run_config_digest"`
 	} `json:"statement"`
 	Payload json.RawMessage `json:"payload"`
 }
@@ -119,11 +131,14 @@ func TestRevocationEnforcement(t *testing.T) {
 	if report.Scenario != "revoked_staple" {
 		t.Fatalf("probe scenario=%q, want revoked_staple", report.Scenario)
 	}
-	if !validDigest(report.ScenarioDigest) {
+	if !validSHA256Digest(report.ScenarioDigest) {
 		t.Fatalf("probe report has invalid scenario_digest %q", report.ScenarioDigest)
 	}
-	if !validDigest(report.ConfigDigest) {
-		t.Fatalf("probe report has invalid config_digest %q", report.ConfigDigest)
+	if !validSHA256Digest(report.RunConfigDigest) {
+		t.Fatalf("probe report has invalid run_config_digest %q", report.RunConfigDigest)
+	}
+	if len(report.IssuedLeafSHA256) != sha256.Size*2 {
+		t.Fatalf("probe report has invalid issued_leaf_sha256 %q", report.IssuedLeafSHA256)
 	}
 	if !report.Valid || report.Phase != "complete" {
 		t.Fatalf("probe cycle validity=%v phase=%q, want valid complete cycle", report.Valid, report.Phase)
@@ -134,6 +149,9 @@ func TestRevocationEnforcement(t *testing.T) {
 	for _, before := range report.Preflight {
 		if before.Error != "" || !before.ExpectationMet {
 			t.Errorf("preflight %s did not satisfy BEFORE contract: decision=%s reason=%s error=%s", before.Profile, before.Decision, before.Reason, before.Error)
+		}
+		if before.ObservedAt.IsZero() || before.AgeAtRevoke < 0 || time.Duration(before.AgeAtRevoke) > 2*time.Second {
+			t.Errorf("preflight %s has invalid causal age: observed_at=%s age=%s", before.Profile, before.ObservedAt, time.Duration(before.AgeAtRevoke))
 		}
 	}
 
@@ -163,13 +181,41 @@ func TestRevocationEnforcement(t *testing.T) {
 		if len(r.ExpectedReasons) > 0 && !reasonAllowed {
 			t.Errorf("%s: reason=%s expected one of %v", r.Profile, r.Reason, r.ExpectedReasons)
 		}
+		if r.Role == "status_oracle" && r.Evidence.PresentedLeafSHA256 != report.IssuedLeafSHA256 {
+			t.Errorf("%s: presented leaf %q does not match issued leaf %q", r.Profile, r.Evidence.PresentedLeafSHA256, report.IssuedLeafSHA256)
+		}
+		for _, dependency := range r.RequiredEvidence {
+			satisfiedAt, ok := r.EvidenceSatisfiedAt[dependency]
+			if !ok || satisfiedAt.IsZero() {
+				t.Errorf("%s: required evidence %s has no satisfaction timestamp", r.Profile, dependency)
+				continue
+			}
+			if r.Role == "client_executor" {
+				if r.ClientAttemptAt.IsZero() {
+					t.Errorf("%s: client executor has no client_attempt_at", r.Profile)
+				} else if satisfiedAt.After(r.ClientAttemptAt) {
+					t.Errorf("%s: evidence %s satisfied at %s after first client attempt %s", r.Profile, dependency, satisfiedAt, r.ClientAttemptAt)
+				}
+			}
+		}
+	}
+
+	if scenarioArtifact := os.Getenv("PROBE_SCENARIO_ARTIFACT"); scenarioArtifact != "" {
+		contents, err := os.ReadFile(scenarioArtifact)
+		if err != nil {
+			t.Fatalf("reading canonical scenario artifact: %v", err)
+		}
+		digest := sha256.Sum256(contents)
+		if got := "sha256:" + hex.EncodeToString(digest[:]); got != report.ScenarioDigest {
+			t.Fatalf("scenario artifact digest=%s, report scenario_digest=%s", got, report.ScenarioDigest)
+		}
 	}
 }
 
-// TestAttestationBindsAssuranceDigests verifies the integration cycle's actual
+// TestAttestationBindsScenarioDigest verifies the integration cycle's actual
 // envelope, not a synthetic payload. CI provisions these paths alongside the
 // cycle report; local report-only runs skip this explicit signature check.
-func TestAttestationBindsAssuranceDigests(t *testing.T) {
+func TestAttestationBindsScenarioDigest(t *testing.T) {
 	attestationPath := os.Getenv("PROBE_ATTESTATION")
 	publicKeyPath := os.Getenv("PROBE_ATTESTATION_PUBLIC_KEY")
 	if attestationPath == "" || publicKeyPath == "" {
@@ -196,15 +242,15 @@ func TestAttestationBindsAssuranceDigests(t *testing.T) {
 	if envelope.Statement.ScenarioDigest != report.ScenarioDigest {
 		t.Fatalf("attestation scenario digest=%q, report digest=%q", envelope.Statement.ScenarioDigest, report.ScenarioDigest)
 	}
-	if envelope.Statement.ConfigDigest != report.ConfigDigest {
-		t.Fatalf("attestation config digest=%q, report digest=%q", envelope.Statement.ConfigDigest, report.ConfigDigest)
+	if envelope.Statement.RunConfigDigest != report.RunConfigDigest {
+		t.Fatalf("attestation run-config digest=%q, report digest=%q", envelope.Statement.RunConfigDigest, report.RunConfigDigest)
 	}
 	var payload cycleReport
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		t.Fatalf("parsing attestation payload: %v", err)
 	}
-	if payload.Scenario != report.Scenario || payload.ScenarioDigest != report.ScenarioDigest || payload.ConfigDigest != report.ConfigDigest {
-		t.Fatalf("attestation payload does not match report assurance identity: %#v", payload)
+	if payload.Scenario != report.Scenario || payload.ScenarioDigest != report.ScenarioDigest || payload.RunConfigDigest != report.RunConfigDigest {
+		t.Fatalf("attestation payload does not match report experiment identity: %#v", payload)
 	}
 	binPath := os.Getenv("PROBE_BIN")
 	if binPath == "" {
@@ -216,7 +262,7 @@ func TestAttestationBindsAssuranceDigests(t *testing.T) {
 	}
 }
 
-func validDigest(value string) bool {
+func validSHA256Digest(value string) bool {
 	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
 		return false
 	}

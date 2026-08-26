@@ -69,10 +69,7 @@ func TestPollOneDoesNotConvertHarnessErrorToSoftFail(t *testing.T) {
 }
 
 func TestRunOnceRejectsUnknownScenarioBeforeIssuing(t *testing.T) {
-	r := &Runner{
-		Config:   &config.Config{Profiles: []config.ProfileConfig{{Name: "unused", Enabled: true, Timeout: time.Second}}},
-		Scenario: profiles.Scenario("missing"), Scenarios: testScenarios("unused"),
-	}
+	r := &Runner{Scenario: profiles.Scenario("missing"), Scenarios: testScenarios("unused")}
 	if report, err := r.RunOnce(context.Background()); err == nil || report != nil {
 		t.Fatalf("RunOnce report=%v err=%v, want missing-scenario failure before issuer use", report, err)
 	}
@@ -80,10 +77,7 @@ func TestRunOnceRejectsUnknownScenarioBeforeIssuing(t *testing.T) {
 
 func TestRunOnceRejectsInvalidManifestStaplingBeforeIssuing(t *testing.T) {
 	scenarioID := profiles.Scenario("invalid")
-	r := &Runner{
-		Config:   &config.Config{Profiles: []config.ProfileConfig{{Name: "unused", Enabled: true, Timeout: time.Second}}},
-		Scenario: scenarioID, Scenarios: scenarios.New(scenarios.Manifest{ID: scenarioID, Digest: "sha256:test", Stapling: scenarios.StaplingMode("maybe")}),
-	}
+	r := &Runner{Scenario: scenarioID, Scenarios: scenarios.New(scenarios.Manifest{ID: scenarioID, Digest: "sha256:test", Stapling: scenarios.StaplingMode("maybe")})}
 	if report, err := r.RunOnce(context.Background()); err == nil || report != nil {
 		t.Fatalf("RunOnce report=%v err=%v, want invalid-stapling failure before issuer use", report, err)
 	}
@@ -107,7 +101,7 @@ func TestPreflightRetainsBeforeObservationEvidence(t *testing.T) {
 	manifest.Profiles["client"] = contract
 	r.Scenarios = scenarios.New(manifest)
 
-	results, err := r.preflight(context.Background(), profiles.Target{Scenario: "test"})
+	results, _, err := r.preflight(context.Background(), profiles.Target{Scenario: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,12 +142,14 @@ func TestPollClientsWaitsForManifestEvidenceDependencies(t *testing.T) {
 		}},
 	}
 	r.Profiles = clientProfiles
-	stapleReady := make(chan struct{})
+	issuerAck := newEvidenceBarrier()
+	issuerAck.satisfy(time.Now())
+	staple := newEvidenceBarrier()
 	done := make(chan []profiles.Result, 1)
 	go func() {
-		done <- r.pollClients(context.Background(), profiles.Target{Scenario: scenarioID}, time.Now(), map[scenarios.EvidenceDependency]evidenceBarrier{
-			scenarios.EvidenceIssuerAck:       {ready: closedEvidence()},
-			scenarios.EvidenceStaplePublished: {ready: stapleReady},
+		done <- r.pollClients(context.Background(), profiles.Target{Scenario: scenarioID}, time.Now(), map[scenarios.EvidenceDependency]*evidenceBarrier{
+			scenarios.EvidenceIssuerAck:       issuerAck,
+			scenarios.EvidenceStaplePublished: staple,
 		})
 	}()
 	select {
@@ -166,19 +162,21 @@ func TestPollClientsWaitsForManifestEvidenceDependencies(t *testing.T) {
 		t.Fatal("manifest-gated client ran before staple publication")
 	default:
 	}
-	close(stapleReady)
+	staple.satisfy(time.Now())
 	if results := <-done; len(results) != 2 {
 		t.Fatalf("results=%d, want 2", len(results))
 	}
 }
 
 func TestTimelineDerivesSeparatePropagationBoundaries(t *testing.T) {
-	ack := time.Now().UTC()
-	timeline := Timeline{
-		RevokeAckAt: ack, OCSPFirstRevoked: ack.Add(time.Second), CRLFirstRevoked: ack.Add(2 * time.Second), StaplePublished: ack.Add(3 * time.Second),
-	}
+	ack := time.Now()
+	timeline := newTimeline(ack.Add(-time.Millisecond), ack)
+	timeline.setOCSPOracleRevoked(ack.Add(time.Second))
+	timeline.setCRLOracleRevoked(ack.Add(2 * time.Second))
+	timeline.setStapleSourceRevoked(ack.Add(3 * time.Second))
+	timeline.setStaplePublished(ack.Add(3500 * time.Millisecond))
 	timeline.derive()
-	if timeline.OCSPPropagationLatency != time.Second || timeline.CRLPropagationLatency != 2*time.Second || timeline.StapleDistributionLatency != 3*time.Second {
+	if timeline.OCSPOraclePropagationLatency != time.Second || timeline.CRLOraclePropagationLatency != 2*time.Second || timeline.StapleSourcePropagationLatency != 3*time.Second || timeline.StapleDistributionLatency != 500*time.Millisecond {
 		t.Fatalf("unexpected derived timeline: %#v", timeline)
 	}
 }
@@ -215,6 +213,101 @@ func TestSortResultsIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestPublicationEvidenceFailsClosedUntilRevokedIsConfirmed(t *testing.T) {
+	if _, err := publicationEvidence(profiles.MethodOCSPDirect, []profiles.Result{{
+		Profile: "oracle", Method: profiles.MethodOCSPDirect,
+		Decision: profiles.DecisionInconclusive, Reason: profiles.ReasonNetworkFailure,
+		ExpectationMet: false,
+	}}); err == nil {
+		t.Fatal("publicationEvidence accepted a completed oracle without REJECT/REVOKED evidence")
+	}
+	at := time.Now()
+	got, err := publicationEvidence(profiles.MethodOCSPDirect, []profiles.Result{{
+		Profile: "oracle", Method: profiles.MethodOCSPDirect,
+		Decision: profiles.DecisionReject, Reason: profiles.ReasonRevoked,
+		ExpectationMet: false, DecisionAt: at,
+	}})
+	if err != nil || !got.Equal(at) {
+		t.Fatalf("publicationEvidence got=%v err=%v, want %v", got, err, at)
+	}
+}
+
+func TestEvidenceBarrierFailurePreventsClientProbe(t *testing.T) {
+	scenarioID := profiles.Scenario("dependency_failure")
+	r := &Runner{Config: &config.Config{
+		PollInterval: time.Millisecond, MaxWait: time.Second, MaxAttempts: 1,
+		Profiles: []config.ProfileConfig{{Name: "client", Enabled: true, Timeout: time.Second}},
+	}, Scenario: scenarioID, Scenarios: scenarios.New(scenarios.Manifest{
+		ID: scenarioID, Digest: "sha256:test", Stapling: scenarios.StaplingOn,
+		Profiles: map[string]scenarios.Contract{"client": {
+			Baseline: profiles.Expectation{After: profiles.DecisionReject, AfterReasons: []profiles.Reason{profiles.ReasonRevoked}},
+			Policy:   profiles.Expectation{After: profiles.DecisionReject, AfterReasons: []profiles.Reason{profiles.ReasonRevoked}},
+		}},
+		EvidenceDependencies: map[string][]scenarios.EvidenceDependency{"client": {scenarios.EvidenceOCSPPublished}},
+	})}
+	called := false
+	r.Profiles = []profiles.Profile{{Name: "client", Role: profiles.RoleClientExecutor, Method: profiles.MethodNone, Probe: func(context.Context, profiles.Target) (profiles.Observation, error) {
+		called = true
+		return profiles.Observation{Decision: profiles.DecisionReject, Reason: profiles.ReasonRevoked}, nil
+	}}}
+	barrier := newEvidenceBarrier()
+	barrier.fail(errors.New("oracle timed out"))
+	results := r.pollClients(context.Background(), profiles.Target{Scenario: scenarioID}, time.Now(), map[scenarios.EvidenceDependency]*evidenceBarrier{
+		scenarios.EvidenceOCSPPublished: barrier,
+	})
+	if called {
+		t.Fatal("dependent client executed after unsatisfied publication evidence")
+	}
+	if len(results) != 1 || results[0].Decision != profiles.DecisionHarnessError || results[0].Err == "" {
+		t.Fatalf("unexpected dependency failure result: %#v", results)
+	}
+}
+
+func TestPreflightRunsEnabledProfilesConcurrently(t *testing.T) {
+	const delay = 80 * time.Millisecond
+	r := &Runner{Config: &config.Config{Profiles: []config.ProfileConfig{
+		{Name: "a", Enabled: true, Timeout: time.Second},
+		{Name: "b", Enabled: true, Timeout: time.Second},
+	}}, Scenarios: testScenarios("a", "b")}
+	probe := func(context.Context, profiles.Target) (profiles.Observation, error) {
+		time.Sleep(delay)
+		return profiles.Observation{Decision: profiles.DecisionAccept, Reason: profiles.ReasonStatusGood}, nil
+	}
+	r.Profiles = []profiles.Profile{
+		{Name: "a", Role: profiles.RoleClientExecutor, Method: profiles.MethodNone, Probe: probe},
+		{Name: "b", Role: profiles.RoleClientExecutor, Method: profiles.MethodNone, Probe: probe},
+	}
+	manifest, _ := r.Scenarios.Manifest("test")
+	for _, name := range []string{"a", "b"} {
+		contract := manifest.Profiles[name]
+		contract.Baseline.Before = profiles.DecisionAccept
+		contract.Baseline.BeforeReasons = []profiles.Reason{profiles.ReasonStatusGood}
+		manifest.Profiles[name] = contract
+	}
+	r.Scenarios = scenarios.New(manifest)
+	started := time.Now()
+	results, _, err := r.preflight(context.Background(), profiles.Target{Scenario: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results=%d, want 2", len(results))
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("preflight appears sequential: elapsed=%s", elapsed)
+	}
+}
+
+func TestValidatePreflightAgeRejectsStaleObservation(t *testing.T) {
+	now := time.Now()
+	if err := validatePreflightAge(map[string]time.Time{"fresh": now.Add(-time.Second)}, now, 2*time.Second); err != nil {
+		t.Fatalf("fresh observation rejected: %v", err)
+	}
+	if err := validatePreflightAge(map[string]time.Time{"stale": now.Add(-3 * time.Second)}, now, 2*time.Second); err == nil {
+		t.Fatal("stale preflight observation accepted")
+	}
+}
+
 func TestRunOnceRejectsZeroEnabledProfilesBeforeIssuing(t *testing.T) {
 	r := &Runner{
 		Config:    &config.Config{Profiles: []config.ProfileConfig{{Name: "client", Enabled: false, Timeout: time.Second}}},
@@ -223,49 +316,5 @@ func TestRunOnceRejectsZeroEnabledProfilesBeforeIssuing(t *testing.T) {
 	}
 	if report, err := r.RunOnce(context.Background()); err == nil || report != nil {
 		t.Fatalf("RunOnce report=%v err=%v, want zero-profile failure before issuer use", report, err)
-	}
-}
-
-func TestPublicationErrorFailsClosedUntilRevocationIsObserved(t *testing.T) {
-	method := profiles.MethodOCSPDirect
-	if err := publicationError(method, nil); err == nil {
-		t.Fatal("empty oracle result set established publication")
-	}
-	if err := publicationError(method, []profiles.Result{{
-		Profile: "oracle", Method: method, Decision: profiles.DecisionInconclusive,
-		Reason: profiles.ReasonNetworkFailure, ExpectationMet: false,
-	}}); err == nil {
-		t.Fatal("inconclusive oracle result established publication")
-	}
-	if err := publicationError(method, []profiles.Result{{
-		Profile: "oracle", Method: method, Decision: profiles.DecisionHarnessError,
-		Reason: profiles.ReasonHarnessFailure, Err: "executor unavailable",
-	}}); err == nil {
-		t.Fatal("harness error established publication")
-	}
-	if err := publicationError(method, []profiles.Result{{
-		Profile: "oracle", Method: method, Decision: profiles.DecisionReject,
-		Reason: profiles.ReasonRevoked, ExpectationMet: true,
-	}}); err != nil {
-		t.Fatalf("revoked oracle result did not establish publication: %v", err)
-	}
-}
-
-func TestWaitForEvidencePropagatesPublicationFailure(t *testing.T) {
-	scenarioID := profiles.Scenario("publication_failure")
-	r := &Runner{Scenarios: scenarios.New(scenarios.Manifest{
-		ID: scenarioID,
-		EvidenceDependencies: map[string][]scenarios.EvidenceDependency{
-			"client": {scenarios.EvidenceOCSPPublished},
-		},
-	})}
-	ready := make(chan struct{})
-	publicationErr := errors.New("publication not established")
-	close(ready)
-	err := r.waitForEvidence(context.Background(), scenarioID, "client", map[scenarios.EvidenceDependency]evidenceBarrier{
-		scenarios.EvidenceOCSPPublished: {ready: ready, err: func() error { return publicationErr }},
-	})
-	if err == nil || !errors.Is(err, publicationErr) {
-		t.Fatalf("waitForEvidence error=%v, want publication failure", err)
 	}
 }

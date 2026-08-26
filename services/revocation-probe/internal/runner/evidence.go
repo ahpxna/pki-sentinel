@@ -83,11 +83,30 @@ func (r *Runner) persistCommandEvidence(cycleID, profile, phase string, evidence
 }
 
 func ensurePrivateDir(path string) error {
+	_, statErr := os.Stat(path)
+	existed := statErr == nil
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return err
 	}
 	// MkdirAll does not change the mode of an existing directory.
-	return os.Chmod(path, 0o700)
+	if err := os.Chmod(path, 0o700); err != nil {
+		return err
+	}
+	if !existed {
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("sync parent directory: %w", err)
+		}
+	}
+	return syncDir(path)
+}
+
+func syncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func writeNewPrivateFile(path string, contents []byte) error {
@@ -109,6 +128,11 @@ func writeNewPrivateFile(path string, contents []byte) error {
 	if err := f.Close(); err != nil {
 		_ = os.Remove(path)
 		return err
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		_ = os.Remove(path)
+		_ = syncDir(filepath.Dir(path))
+		return fmt.Errorf("sync evidence directory: %w", err)
 	}
 	return nil
 }
