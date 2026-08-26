@@ -104,12 +104,19 @@ services:
         for i in $(seq 1 60); do
           status="$$(vault status 2>&1 || true)"
           if echo "$$status" | grep -qi 'initialized.*false'; then
-            vault operator init -recovery-shares=1 -recovery-threshold=1 -format=json > /vault/seal/init.json
+            vault operator init -key-shares=1 -key-threshold=1 -format=json > /vault/seal/init.json
             sed -n 's/.*"root_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /vault/seal/init.json > /vault/seal/root-token
-            chmod 0600 /vault/seal/init.json /vault/seal/root-token
+            sed -n 's/.*"keys_base64"[[:space:]]*:[[:space:]]*\["\([^"]*\)".*/\1/p' /vault/seal/init.json > /vault/seal/unseal-key
+            chmod 0600 /vault/seal/init.json /vault/seal/root-token /vault/seal/unseal-key
+            vault operator unseal "$$(cat /vault/seal/unseal-key)" >/dev/null
             break
           fi
-          if echo "$$status" | grep -qi 'initialized.*true'; then break; fi
+          if echo "$$status" | grep -qi 'initialized.*true'; then
+            if echo "$$status" | grep -qi 'sealed.*true' && [ -s /vault/seal/unseal-key ]; then
+              vault operator unseal "$$(cat /vault/seal/unseal-key)" >/dev/null
+            fi
+            break
+          fi
           sleep 1
         done
         wait "$$pid"
