@@ -135,6 +135,8 @@ func cmdBaseline(args []string) {
 		os.Exit(2)
 	}
 	if nextFromPath != "" {
+		// #nosec G703 -- --next-from is an explicit operator-selected predecessor baseline path;
+		// the file is strictly parsed and signature-verified before any state is derived from it.
 		data, err := os.ReadFile(nextFromPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "baseline: reading --next-from %s: %v\n", nextFromPath, err)
