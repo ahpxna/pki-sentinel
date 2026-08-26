@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
@@ -183,5 +184,55 @@ func TestArchiveCycleReportIsImmutableAndLatestCopyIsReplaceable(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join(dir, "last-cycle.json"))
 	if err != nil || string(contents) != `{"cycle_id":"cycle-2"}` {
 		t.Fatalf("latest cycle report=%q err=%v", contents, err)
+	}
+}
+
+func TestArchiveCycleReportConcurrentWritersCannotReplaceWinner(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{EvidenceDir: dir}
+	payloads := [][]byte{[]byte(`{"writer":"one"}`), []byte(`{"writer":"two"}`)}
+
+	start := make(chan struct{})
+	results := make(chan struct {
+		index int
+		err   error
+	}, len(payloads))
+	var wg sync.WaitGroup
+	for i := range payloads {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			results <- struct {
+				index int
+				err   error
+			}{index: index, err: r.ArchiveCycleReport("cycle-race", payloads[index])}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	winner := -1
+	failures := 0
+	for result := range results {
+		if result.err == nil {
+			if winner != -1 {
+				t.Fatalf("multiple immutable archive writers succeeded: %d and %d", winner, result.index)
+			}
+			winner = result.index
+		} else {
+			failures++
+		}
+	}
+	if winner == -1 || failures != len(payloads)-1 {
+		t.Fatalf("winner=%d failures=%d, want one winner and one rejection", winner, failures)
+	}
+	contents, err := os.ReadFile(filepath.Join(dir, "cycle-race", "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != string(payloads[winner]) {
+		t.Fatalf("immutable archive content=%q, want winning payload %q", contents, payloads[winner])
 	}
 }

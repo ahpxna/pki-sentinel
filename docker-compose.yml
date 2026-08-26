@@ -101,28 +101,45 @@ services:
         /usr/local/bin/docker-entrypoint.sh vault server -config=/vault/seal/config/vault.hcl &
         pid=$$!
         trap 'kill "$$pid" 2>/dev/null || true; wait "$$pid" 2>/dev/null || true' EXIT TERM INT
+        seal_ready=0
         for i in $(seq 1 60); do
           status="$$(vault status 2>&1 || true)"
           if echo "$$status" | grep -qi 'initialized.*false'; then
             vault operator init -key-shares=1 -key-threshold=1 -format=json > /vault/seal/init.json
             grep -o '"root_token"[[:space:]]*:[[:space:]]*"[^"]*"' /vault/seal/init.json | sed 's/.*"\([^"]*\)"[[:space:]]*$/\1/' > /vault/seal/root-token
-            grep -oE '[A-Za-z0-9+/=]{20,}' /vault/seal/init.json | head -n 1 > /vault/seal/unseal-key
+            # Bind extraction to Vault's documented unseal_keys_b64 field.
+            # Searching the whole JSON for a base64-looking string can select
+            # an unrelated future field and persist the wrong credential.
+            sed -n '/"unseal_keys_b64"[[:space:]]*:/,/]/p' /vault/seal/init.json \
+              | grep -oE '"[A-Za-z0-9+/=]{20,}"' \
+              | head -n 1 \
+              | tr -d '"' > /vault/seal/unseal-key
             chmod 0600 /vault/seal/init.json /vault/seal/root-token /vault/seal/unseal-key
             if [ ! -s /vault/seal/root-token ] || [ ! -s /vault/seal/unseal-key ]; then
               echo "vault-seal init did not produce persistent credentials" >&2
               exit 1
             fi
             vault operator unseal "$$(cat /vault/seal/unseal-key)" >/dev/null
+            seal_ready=1
             break
           fi
           if echo "$$status" | grep -qi 'initialized.*true'; then
-            if echo "$$status" | grep -qi 'sealed.*true' && [ -s /vault/seal/unseal-key ]; then
+            if echo "$$status" | grep -qi 'sealed.*true'; then
+              if [ ! -s /vault/seal/unseal-key ]; then
+                echo "vault-seal is initialized and sealed but its persisted unseal key is missing" >&2
+                exit 1
+              fi
               vault operator unseal "$$(cat /vault/seal/unseal-key)" >/dev/null
             fi
+            seal_ready=1
             break
           fi
           sleep 1
         done
+        if [ "$$seal_ready" -ne 1 ]; then
+          echo "vault-seal did not reach an initialized state within 60 seconds" >&2
+          exit 1
+        fi
         wait "$$pid"
     environment:
       VAULT_ADDR: http://127.0.0.1:8200

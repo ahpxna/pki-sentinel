@@ -1,12 +1,15 @@
 # truststore-drift-agent
 
-Detects unauthorized root CA installation by hashing the SubjectPublicKeyInfo
-of every root in the host trust store and diffing against a signed baseline.
-Baselines are signed with Ed25519; checks fail closed if the JSON is changed
-or the matching public key is unavailable. Runtime scans detect added,
-removed, changed, expired, and expiring roots. Keep the private signing key
-offline and pin the verification key outside the monitored endpoint in
-production.
+Detects unauthorized root CA installation by recording both the exact
+certificate SHA-256 and its SubjectPublicKeyInfo SHA-256 for every root in the
+host trust store and diffing against a signed baseline. Modern baselines use
+the certificate digest as the authoritative identity, so one certificate
+cannot hide removal of a different certificate that reuses the same public
+key; SPKI-only matching is retained only for legacy baselines. Baselines are
+signed with Ed25519; checks fail closed if the JSON is changed or the matching
+public key is unavailable. Runtime scans detect added, removed, changed,
+expired, and expiring roots. Keep the private signing key offline and pin the
+verification key outside the monitored endpoint in production.
 
 ## Why this exists
 

@@ -292,15 +292,9 @@ func opensslOCSPDirect() Profile {
 			if parseErr != nil {
 				return withEvidence(observe(DecisionReject, ReasonInvalidStatus)), nil
 			}
-			if reason := checkOCSPFreshness(resp, time.Now(), target.StatusFreshness, target.OCSPFreshness); reason != "" {
+			if reason := ValidateOCSPTemporal(resp, leaf, time.Now(), target.StatusFreshness, target.OCSPFreshness); reason != "" {
 				metrics.OCSPResponderUp.Set(1)
 				return withEvidence(observe(DecisionReject, reason)), nil
-			}
-			if resp.Status == ocsp.Revoked {
-				if reason := checkRevocationTime(resp.RevokedAt, leaf.NotBefore, time.Now(), target.StatusFreshness); reason != "" {
-					metrics.OCSPResponderUp.Set(1)
-					return withEvidence(observe(DecisionReject, reason)), nil
-				}
 			}
 			metrics.OCSPResponderUp.Set(1)
 			switch resp.Status {
@@ -468,13 +462,10 @@ func goTLSOCSP() Profile {
 			if err != nil {
 				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonInvalidStatus), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
-			if reason := checkOCSPFreshness(resp, time.Now(), target.StatusFreshness, target.OCSPFreshness); reason != "" {
+			if reason := ValidateOCSPTemporal(resp, leaf, time.Now(), target.StatusFreshness, target.OCSPFreshness); reason != "" {
 				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, reason), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
 			if resp.Status == ocsp.Revoked {
-				if reason := checkRevocationTime(resp.RevokedAt, leaf.NotBefore, time.Now(), target.StatusFreshness); reason != "" {
-					return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, reason), "stapled-ocsp.der", "application/ocsp-response", staple), nil
-				}
 				return withBinaryEvidence(inProcessObservation("go-hardfail-ocsp", DecisionReject, ReasonRevoked), "stapled-ocsp.der", "application/ocsp-response", staple), nil
 			}
 			if resp.Status == ocsp.Unknown {
@@ -591,6 +582,24 @@ func crlCheck() Profile {
 func withBinaryEvidence(observation Observation, name, mediaType string, contents []byte) Observation {
 	observation.Evidence.RawArtifacts = append(observation.Evidence.RawArtifacts, binaryArtifact(name, mediaType, contents))
 	return observation
+}
+
+// ValidateOCSPTemporal applies the experiment's signed temporal policy to a
+// cryptographically parsed OCSP response. Callers that publish an OCSP
+// response as an evidence boundary must use the same validation as the status
+// oracle and hard-fail client so stale or future-invalid status cannot release
+// dependent clients.
+func ValidateOCSPTemporal(response *ocsp.Response, leaf *x509.Certificate, now time.Time, configuredStatus StatusFreshnessPolicy, configuredOCSP OCSPFreshnessPolicy) Reason {
+	if response == nil || leaf == nil {
+		return ReasonInvalidStatus
+	}
+	if reason := checkOCSPFreshness(response, now, configuredStatus, configuredOCSP); reason != "" {
+		return reason
+	}
+	if response.Status == ocsp.Revoked {
+		return checkRevocationTime(response.RevokedAt, leaf.NotBefore, now, configuredStatus)
+	}
+	return ""
 }
 
 func checkOCSPFreshness(response *ocsp.Response, now time.Time, configuredStatus StatusFreshnessPolicy, configuredOCSP OCSPFreshnessPolicy) Reason {

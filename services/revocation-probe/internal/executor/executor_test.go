@@ -121,3 +121,31 @@ func TestRemoteCarriesControllerConfiguredTimeout(t *testing.T) {
 		t.Fatalf("remote probe: %v", err)
 	}
 }
+
+func TestDecodeStrictJSONRejectsUnknownFieldsAndTrailingValues(t *testing.T) {
+	for name, body := range map[string]string{
+		"unknown field":   `{"decision":"ACCEPT","reason":"STATUS_GOOD","future_field":true}`,
+		"second document": `{"decision":"ACCEPT","reason":"STATUS_GOOD"} {"decision":"REJECT","reason":"REVOKED"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var observation profiles.Observation
+			if err := decodeStrictJSON(strings.NewReader(body), &observation); err == nil {
+				t.Fatalf("ambiguous executor JSON accepted: %s", body)
+			}
+		})
+	}
+}
+
+func TestRemoteRejectsAmbiguousExecutorResponse(t *testing.T) {
+	t.Setenv("PROBE_EXECUTOR_TOKEN", "test-token")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"decision":"ACCEPT","reason":"STATUS_GOOD"} {"decision":"REJECT","reason":"REVOKED"}`)
+	}))
+	defer server.Close()
+
+	profile := Remote(profiles.Profile{Name: "curl-default"}, server.URL)
+	if _, err := profile.Probe(context.Background(), profiles.Target{}); err == nil || !strings.Contains(err.Error(), "multiple values") {
+		t.Fatalf("ambiguous executor response error=%v", err)
+	}
+}

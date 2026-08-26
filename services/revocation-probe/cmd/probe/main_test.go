@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/runner"
@@ -61,5 +64,30 @@ func TestWriteReportJSONUsesCanonicalBytes(t *testing.T) {
 	wantStream := append(append([]byte(nil), canonicalJSON...), '\n')
 	if !bytes.Equal(stream.Bytes(), wantStream) {
 		t.Fatalf("stream framing mismatch: got %q want %q", stream.Bytes(), wantStream)
+	}
+}
+
+func TestFinalizeCycleEmitsReportWhenArchiveSinkFails(t *testing.T) {
+	dir := t.TempDir()
+	cycleDir := filepath.Join(dir, "cycle-archive-failure")
+	if err := os.MkdirAll(cycleDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cycleDir, "report.json"), []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	report := &runner.CycleReport{CycleID: "cycle-archive-failure"}
+	canonical, err := report.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	err = finalizeCycle(report, nil, &runner.Runner{EvidenceDir: dir}, nil, "", "json", false, &stdout)
+	if err == nil || !strings.Contains(err.Error(), "archive cycle report") {
+		t.Fatalf("finalizeCycle error=%v, want archive failure", err)
+	}
+	if !bytes.Equal(stdout.Bytes(), canonical) {
+		t.Fatalf("cycle disappeared from stdout after sink failure: got %q want %q", stdout.Bytes(), canonical)
 	}
 }

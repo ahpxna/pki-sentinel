@@ -107,6 +107,27 @@ func TestCheckOCSPFreshness(t *testing.T) {
 	}
 }
 
+func TestValidateOCSPTemporalRejectsInvalidRevocationBoundary(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	leaf := &x509.Certificate{NotBefore: now.Add(-time.Hour)}
+	status := StatusFreshnessPolicy{MaxClockSkew: 5 * time.Minute}
+	freshness := OCSPFreshnessPolicy{RequireNextUpdate: true, MaxAgeWithoutNextUpdate: time.Hour}
+	response := &ocsp.Response{
+		Status:     ocsp.Revoked,
+		ProducedAt: now.Add(-time.Minute),
+		ThisUpdate: now.Add(-time.Minute),
+		NextUpdate: now.Add(time.Minute),
+		RevokedAt:  now.Add(6 * time.Minute),
+	}
+	if got := ValidateOCSPTemporal(response, leaf, now, status, freshness); got != ReasonFutureStatus {
+		t.Fatalf("future revoked status classified %s, want %s", got, ReasonFutureStatus)
+	}
+	response.RevokedAt = now.Add(-time.Minute)
+	if got := ValidateOCSPTemporal(response, leaf, now, status, freshness); got != "" {
+		t.Fatalf("fresh revoked status classified %s", got)
+	}
+}
+
 func TestCheckRevocationTimeRejectsFutureAndImpossibleValues(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	notBefore := now.Add(-time.Hour)

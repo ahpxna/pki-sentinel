@@ -412,7 +412,7 @@ func evaluateTrustStore(baseline Baseline, certs []*x509.Certificate, now time.T
 	knownBySPKI := make(map[string][]RootEntry, len(baseline.Roots))
 	knownBySubject := make(map[string]RootEntry, len(baseline.Roots))
 	observedByCertHash := make(map[string]*x509.Certificate, len(certs))
-	observedSPKIs := make(map[string]struct{}, len(certs))
+	observedBySPKI := make(map[string]map[string]struct{}, len(certs))
 	for _, root := range baseline.Roots {
 		if root.CertHash != "" {
 			knownByCertHash[root.CertHash] = root
@@ -421,8 +421,13 @@ func evaluateTrustStore(baseline Baseline, certs []*x509.Certificate, now time.T
 		knownBySubject[root.Subject] = root
 	}
 	for _, cert := range certs {
-		observedByCertHash[certificateHash(cert)] = cert
-		observedSPKIs[spkiHash(cert)] = struct{}{}
+		certHash := certificateHash(cert)
+		spki := spkiHash(cert)
+		observedByCertHash[certHash] = cert
+		if observedBySPKI[spki] == nil {
+			observedBySPKI[spki] = make(map[string]struct{})
+		}
+		observedBySPKI[spki][certHash] = struct{}{}
 	}
 
 	for _, c := range certs {
@@ -478,13 +483,43 @@ func evaluateTrustStore(baseline Baseline, certs []*x509.Certificate, now time.T
 			})
 		}
 	}
+	// Compute a one-to-one same-SPKI substitution budget. Exact certificate
+	// matches are consumed first. Remaining observed certificates may satisfy a
+	// legacy SPKI-only entry or represent one changed modern certificate, but a
+	// single sibling certificate must never hide removal of multiple baseline
+	// roots that happen to share its public key.
+	substitutionBudget := make(map[string]int, len(observedBySPKI))
+	for spki, observedHashes := range observedBySPKI {
+		exactMatches := 0
+		for certHash := range observedHashes {
+			if _, exists := knownByCertHash[certHash]; exists {
+				exactMatches++
+			}
+		}
+		substitutionBudget[spki] = len(observedHashes) - exactMatches
+	}
+	legacyMatches := make(map[string]int)
+	for _, root := range baseline.Roots {
+		if root.CertHash == "" && substitutionBudget[root.SPKIHash] > 0 {
+			legacyMatches[root.SPKIHash]++
+			substitutionBudget[root.SPKIHash]--
+		}
+	}
+
 	for _, root := range baseline.Roots {
 		if root.CertHash != "" {
 			if _, observed := observedByCertHash[root.CertHash]; observed {
 				continue
 			}
-		}
-		if _, substituted := observedSPKIs[root.SPKIHash]; substituted {
+			if substitutionBudget[root.SPKIHash] > 0 {
+				// A distinct observed certificate using this key is already
+				// classified as ROOT_CERT_CHANGED/ROOT_POLICY_CHANGED above.
+				// Consume it once so replacement is not double-counted as removal.
+				substitutionBudget[root.SPKIHash]--
+				continue
+			}
+		} else if legacyMatches[root.SPKIHash] > 0 {
+			legacyMatches[root.SPKIHash]--
 			continue
 		}
 		result.MissingRoots++

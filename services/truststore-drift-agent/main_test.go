@@ -231,6 +231,29 @@ func TestBaselinePermitsSharedSubjectOrSPKIWhenCertificatesDiffer(t *testing.T) 
 	}
 }
 
+func TestEvaluateTrustStoreDetectsRemovedSameSPKISibling(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	certA := testCertificate(t, "Shared Key A", now.Add(365*24*time.Hour))
+	certB := *certA
+	certB.Subject = pkix.Name{CommonName: "Shared Key B"}
+	certB.Raw = append([]byte("shared-key-b:"), certA.Raw...)
+
+	baseline := Baseline{Roots: []RootEntry{rootEntry(certA), rootEntry(&certB)}}
+	result := evaluateTrustStore(baseline, []*x509.Certificate{certA}, now)
+	if result.MissingRoots != 1 {
+		t.Fatalf("same-SPKI sibling removal was hidden: %+v", result)
+	}
+	var removedB bool
+	for _, event := range result.Events {
+		if event.Event == "EXPECTED_ROOT_REMOVED" && event.Subject == certB.Subject.String() {
+			removedB = true
+		}
+	}
+	if !removedB {
+		t.Fatalf("missing exact certificate did not produce EXPECTED_ROOT_REMOVED: %#v", result.Events)
+	}
+}
+
 func TestSameSPKICertificateChangeIsNotDeduplicatedAway(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

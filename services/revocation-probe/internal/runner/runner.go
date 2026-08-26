@@ -241,6 +241,10 @@ func (r *Runner) RunOnce(ctx context.Context) (*CycleReport, error) {
 			metrics.CycleTotal.WithLabelValues("error").Inc()
 			return fail(PhaseCanary, fmt.Errorf("runner: pre-revocation OCSP status=%d, expected good", status))
 		}
+		if err := r.validateOCSPStaple(staple, cert, ocsp.Good); err != nil {
+			metrics.CycleTotal.WithLabelValues("error").Inc()
+			return fail(PhaseCanary, fmt.Errorf("runner: invalid pre-revocation OCSP staple: %w", err))
+		}
 		log.Printf("[cycle %s] pre-revocation OCSP status for staple: good", cycleID)
 	}
 
@@ -572,6 +576,33 @@ func (t *Timeline) derive() {
 	}
 }
 
+func (r *Runner) validateOCSPStaple(staple []byte, cert *issuer.CanaryCert, expectedStatus int) error {
+	if cert == nil || cert.Cert == nil || cert.IssuerCert == nil {
+		return fmt.Errorf("canary certificate and issuer are required")
+	}
+	response, err := ocsp.ParseResponseForCert(staple, cert.Cert, cert.IssuerCert)
+	if err != nil {
+		return fmt.Errorf("parse OCSP staple: %w", err)
+	}
+	if response.Status != expectedStatus {
+		return fmt.Errorf("ocsp staple status=%d, expected %d", response.Status, expectedStatus)
+	}
+	reason := profiles.ValidateOCSPTemporal(
+		response,
+		cert.Cert,
+		time.Now(),
+		profiles.StatusFreshnessPolicy{MaxClockSkew: r.Config.StatusFreshness.MaxClockSkew},
+		profiles.OCSPFreshnessPolicy{
+			RequireNextUpdate:       r.Config.OCSPFreshness.RequireNextUpdate,
+			MaxAgeWithoutNextUpdate: r.Config.OCSPFreshness.MaxAgeWithoutNextUpdate,
+		},
+	)
+	if reason != "" {
+		return fmt.Errorf("ocsp staple violates temporal policy: %s", reason)
+	}
+	return nil
+}
+
 func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, cert *issuer.CanaryCert) ([]byte, time.Time, time.Time, error) {
 	deadline := time.Now().Add(r.Config.MaxWait)
 	var lastErr error
@@ -593,10 +624,14 @@ func (r *Runner) refreshRevokedStaple(ctx context.Context, srv *canary.Server, c
 		cancel()
 		lastErr, lastStatus = err, status
 		if err == nil && status == ocsp.Revoked {
-			sourceRevokedAt := time.Now()
-			srv.SetOCSPStaple(staple)
-			publishedAt := time.Now()
-			return staple, sourceRevokedAt, publishedAt, nil
+			if validationErr := r.validateOCSPStaple(staple, cert, ocsp.Revoked); validationErr != nil {
+				lastErr = validationErr
+			} else {
+				sourceRevokedAt := time.Now()
+				srv.SetOCSPStaple(staple)
+				publishedAt := time.Now()
+				return staple, sourceRevokedAt, publishedAt, nil
+			}
 		}
 
 		sleepFor := r.Config.PollInterval

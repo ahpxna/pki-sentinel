@@ -98,3 +98,62 @@ func TestWaitReachableTimesOut(t *testing.T) {
 		t.Fatal("expected WaitReachable to time out")
 	}
 }
+
+func TestCloseTerminatesStalledTLSHandshakes(t *testing.T) {
+	certPEM, keyPEM := selfSignedPEM(t, "stalled.canary.internal")
+	s, err := Start("stalled.canary.internal", certPEM, keyPEM, nil)
+	if err != nil {
+		t.Skipf("loopback listeners are unavailable in this environment: %v", err)
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%d", s.Port)
+	const clients = 12
+	connections := make([]net.Conn, 0, clients)
+	for i := 0; i < clients; i++ {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		if err != nil {
+			t.Fatalf("dial stalled client %d: %v", i, err)
+		}
+		connections = append(connections, conn)
+	}
+	defer func() {
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.connMu.Lock()
+		active := len(s.conns)
+		s.connMu.Unlock()
+		if active == clients {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server accepted %d/%d stalled clients", active, clients)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked on stalled TLS handshakes")
+	}
+
+	s.connMu.Lock()
+	active := len(s.conns)
+	s.connMu.Unlock()
+	if active != 0 {
+		t.Fatalf("%d accepted connections remain after Close", active)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}

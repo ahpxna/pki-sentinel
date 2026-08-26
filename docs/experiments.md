@@ -14,6 +14,10 @@ meaning of existing measurements.
   so a verifier can independently check the causal guard for each profile.
 - Every cycle that reaches a run identity is reportable even when the harness
   fails; `valid` and `phase` keep invalid trials in the experiment denominator.
+  Failures in secondary archive/attestation sinks are returned as errors but do
+  not suppress the canonical report on stdout.
+- Per-cycle report and attestation files use atomic create-without-replacement;
+  only the explicit `last-cycle*` convenience copies are replaceable.
 - Scenario conformance describes observed baseline behavior. Policy conformance
   is separately recorded and may be enforced only when the deployment enables
   `policy.enforce`.
@@ -57,8 +61,9 @@ profiles:
 
 The selected `probe run --scenario <id>` manifest controls its canary stapling
 mode and each client profile's evidence boundary. For example,
-`staple_published` holds a profile until a revoked staple is published, while
-`issuer_ack` allows it to begin immediately after issuer acknowledgement.
+`staple_published` holds a profile until a cryptographically parsed revoked
+staple also satisfies the signed OCSP freshness and revocation-time policy,
+while `issuer_ack` allows it to begin immediately after issuer acknowledgement.
 `ocsp_published` and `crl_published` are fail-closed: merely finishing an oracle
 goroutine does not satisfy the dependency; the relevant oracle must produce
 validated `REJECT / REVOKED` evidence. Every dependency satisfaction timestamp

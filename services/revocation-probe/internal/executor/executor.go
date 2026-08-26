@@ -70,7 +70,7 @@ func Remote(profile profiles.Profile, baseURL string) profiles.Profile {
 			return profiles.Observation{}, fmt.Errorf("executor %s returned HTTP %d", profile.Name, response.StatusCode)
 		}
 		var observation profiles.Observation
-		if err := json.NewDecoder(io.LimitReader(response.Body, maxRequestBytes)).Decode(&observation); err != nil {
+		if err := decodeStrictJSON(response.Body, &observation); err != nil {
 			return profiles.Observation{}, fmt.Errorf("decode executor response: %w", err)
 		}
 		if observation.HarnessError != "" {
@@ -79,6 +79,29 @@ func Remote(profile profiles.Profile, baseURL string) profiles.Profile {
 		return observation, nil
 	}
 	return profile
+}
+
+func decodeStrictJSON(r io.Reader, dst any) error {
+	contents, err := io.ReadAll(io.LimitReader(r, maxRequestBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(contents) > maxRequestBytes {
+		return fmt.Errorf("json body exceeds %d bytes", maxRequestBytes)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("json body contains multiple values")
+		}
+		return fmt.Errorf("trailing json data: %w", err)
+	}
+	return nil
 }
 
 // ApplyRemote replaces profiles named by URLs with remote executors. Entries
@@ -173,9 +196,7 @@ func Serve(ctx context.Context, address, profileName string) error {
 		}
 		defer r.Body.Close()
 		var target profiles.Target
-		decoder := json.NewDecoder(io.LimitReader(r.Body, maxRequestBytes))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&target); err != nil {
+		if err := decodeStrictJSON(r.Body, &target); err != nil {
 			http.Error(w, "invalid probe target", http.StatusBadRequest)
 			return
 		}

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -178,38 +179,8 @@ func cmdRun(args []string) {
 	}
 
 	runCycle := func() error {
-		report, err := r.RunOnce(ctx)
-		if report != nil {
-			canonicalJSON, marshalErr := report.CanonicalJSON()
-			if marshalErr != nil {
-				return marshalErr
-			}
-			if archiveErr := r.ArchiveCycleReport(report.CycleID, canonicalJSON); archiveErr != nil {
-				return fmt.Errorf("archive cycle report: %w", archiveErr)
-			}
-			if latestErr := r.UpdateLatestCycleReport(canonicalJSON); latestErr != nil {
-				return fmt.Errorf("update latest cycle report: %w", latestErr)
-			}
-			if len(attestationPrivateKey) > 0 {
-				attestationJSON, signErr := marshalAttestation(attestationPrivateKey, canonicalJSON)
-				if signErr != nil {
-					return fmt.Errorf("write assurance attestation: %w", signErr)
-				}
-				if archiveErr := r.ArchiveCycleAttestation(report.CycleID, attestationJSON); archiveErr != nil {
-					return fmt.Errorf("archive cycle attestation: %w", archiveErr)
-				}
-				if latestErr := r.UpdateLatestCycleAttestation(attestationJSON); latestErr != nil {
-					return fmt.Errorf("update latest cycle attestation: %w", latestErr)
-				}
-				if writeErr := writeAttestation(*attestationOut, attestationJSON); writeErr != nil {
-					return fmt.Errorf("write assurance attestation: %w", writeErr)
-				}
-			}
-			if printErr := writeReport(os.Stdout, report, *output, canonicalJSON, !*once); printErr != nil {
-				return fmt.Errorf("write cycle report: %w", printErr)
-			}
-		}
-		return err
+		report, cycleErr := r.RunOnce(ctx)
+		return finalizeCycle(report, cycleErr, r, attestationPrivateKey, *attestationOut, *output, !*once, os.Stdout)
 	}
 
 	if *once {
@@ -234,6 +205,59 @@ func cmdRun(args []string) {
 			}
 		}
 	}
+}
+
+func finalizeCycle(report *runner.CycleReport, cycleErr error, r *runner.Runner, attestationPrivateKey []byte, attestationOut, output string, delimitJSON bool, stdout io.Writer) error {
+	if report == nil {
+		return cycleErr
+	}
+
+	canonicalJSON, err := report.CanonicalJSON()
+	if err != nil {
+		return errors.Join(cycleErr, fmt.Errorf("canonicalize cycle report: %w", err))
+	}
+
+	// A completed in-memory cycle is evidence even when a secondary durable
+	// sink is unavailable. Attempt every sink independently, and always emit
+	// stdout so invalid/failed trials do not silently disappear from the
+	// experiment denominator.
+	errs := make([]error, 0, 6)
+	if cycleErr != nil {
+		errs = append(errs, cycleErr)
+	}
+	reportArchived := true
+	if archiveErr := r.ArchiveCycleReport(report.CycleID, canonicalJSON); archiveErr != nil {
+		reportArchived = false
+		errs = append(errs, fmt.Errorf("archive cycle report: %w", archiveErr))
+	}
+	if latestErr := r.UpdateLatestCycleReport(canonicalJSON); latestErr != nil {
+		errs = append(errs, fmt.Errorf("update latest cycle report: %w", latestErr))
+	}
+	if len(attestationPrivateKey) > 0 {
+		attestationJSON, signErr := marshalAttestation(attestationPrivateKey, canonicalJSON)
+		if signErr != nil {
+			errs = append(errs, fmt.Errorf("sign assurance attestation: %w", signErr))
+		} else {
+			// Never add an attestation to a cycle directory whose report could
+			// not be published: an existing conflicting report must not acquire
+			// an envelope for different canonical bytes.
+			if reportArchived {
+				if archiveErr := r.ArchiveCycleAttestation(report.CycleID, attestationJSON); archiveErr != nil {
+					errs = append(errs, fmt.Errorf("archive cycle attestation: %w", archiveErr))
+				}
+			}
+			if latestErr := r.UpdateLatestCycleAttestation(attestationJSON); latestErr != nil {
+				errs = append(errs, fmt.Errorf("update latest cycle attestation: %w", latestErr))
+			}
+			if writeErr := writeAttestation(attestationOut, attestationJSON); writeErr != nil {
+				errs = append(errs, fmt.Errorf("write assurance attestation: %w", writeErr))
+			}
+		}
+	}
+	if printErr := writeReport(stdout, report, output, canonicalJSON, delimitJSON); printErr != nil {
+		errs = append(errs, fmt.Errorf("write cycle report: %w", printErr))
+	}
+	return errors.Join(errs...)
 }
 
 func marshalAttestation(privateKey, canonicalJSON []byte) ([]byte, error) {

@@ -16,6 +16,8 @@ import (
 type StaplingMode string
 
 const (
+	connectionDeadline = 5 * time.Second
+
 	// StaplingOn staples a freshly fetched OCSP response reflecting the
 	// certificate's current (possibly revoked) status.
 	StaplingOn StaplingMode = "on"
@@ -34,6 +36,13 @@ type Server struct {
 
 	ln  net.Listener
 	srv *tlsServer
+
+	connMu     sync.Mutex
+	conns      map[net.Conn]struct{}
+	handlers   sync.WaitGroup
+	acceptDone chan struct{}
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 type tlsServer struct {
@@ -77,10 +86,12 @@ func StartOn(bindHost, hostname string, certPEM, keyPEM []byte, staple []byte) (
 	}
 
 	s := &Server{
-		Hostname: hostname,
-		Port:     port,
-		ln:       ln,
-		srv:      tlsSrv,
+		Hostname:   hostname,
+		Port:       port,
+		ln:         ln,
+		srv:        tlsSrv,
+		conns:      make(map[net.Conn]struct{}),
+		acceptDone: make(chan struct{}),
 	}
 
 	go s.serve()
@@ -88,14 +99,32 @@ func StartOn(bindHost, hostname string, certPEM, keyPEM []byte, staple []byte) (
 }
 
 func (s *Server) serve() {
+	defer close(s.acceptDone)
 	tlsLn := tls.NewListener(s.ln, s.srv.config)
 	for {
 		conn, err := tlsLn.Accept()
 		if err != nil {
 			return // listener closed
 		}
+
+		s.connMu.Lock()
+		s.conns[conn] = struct{}{}
+		s.handlers.Add(1)
+		s.connMu.Unlock()
+
 		go func(c net.Conn) {
-			defer c.Close()
+			defer s.handlers.Done()
+			defer func() {
+				s.connMu.Lock()
+				delete(s.conns, c)
+				s.connMu.Unlock()
+				_ = c.Close()
+			}()
+
+			// tls.Listener performs the handshake lazily on the first I/O. A
+			// peer that opens TCP and never sends ClientHello must not pin an
+			// assurance goroutine or file descriptor indefinitely.
+			_ = c.SetDeadline(time.Now().Add(connectionDeadline))
 			// Minimal HTTP/1.1 response; profiles only care about the TLS
 			// handshake and revocation-check outcome, not response body.
 			_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
@@ -112,9 +141,27 @@ func (s *Server) SetOCSPStaple(staple []byte) {
 	s.srv.cert = &cert
 }
 
-// Close stops the listener.
+// Close stops the listener, closes every accepted connection, and waits for
+// all TLS handlers to exit. It is safe to call more than once.
 func (s *Server) Close() error {
-	return s.ln.Close()
+	s.closeOnce.Do(func() {
+		s.closeErr = s.ln.Close()
+		// Once the accept loop exits no new connection can be added to conns,
+		// so the snapshot below covers every accepted peer.
+		<-s.acceptDone
+
+		s.connMu.Lock()
+		active := make([]net.Conn, 0, len(s.conns))
+		for conn := range s.conns {
+			active = append(active, conn)
+		}
+		s.connMu.Unlock()
+		for _, conn := range active {
+			_ = conn.Close()
+		}
+		s.handlers.Wait()
+	})
+	return s.closeErr
 }
 
 // WaitReachable polls the canary endpoint until it accepts a raw TCP

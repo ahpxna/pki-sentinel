@@ -2,13 +2,16 @@ package runner
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/config"
+	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/issuer"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/scenarios"
+	"golang.org/x/crypto/ocsp"
 )
 
 func testScenarios(names ...string) *scenarios.Registry {
@@ -24,6 +27,17 @@ func testScenarios(names ...string) *scenarios.Registry {
 		dependencies[name] = []scenarios.EvidenceDependency{scenarios.EvidenceIssuerAck}
 	}
 	return scenarios.New(scenarios.Manifest{ID: profiles.Scenario("test"), Digest: "sha256:test", Stapling: scenarios.StaplingOn, Profiles: contracts, EvidenceDependencies: dependencies})
+}
+
+func TestValidateOCSPStapleRejectsMalformedPublicationEvidence(t *testing.T) {
+	r := &Runner{Config: &config.Config{
+		StatusFreshness: config.StatusFreshnessConfig{MaxClockSkew: time.Minute},
+		OCSPFreshness:   config.OCSPFreshnessConfig{RequireNextUpdate: true, MaxAgeWithoutNextUpdate: time.Hour},
+	}}
+	cert := &issuer.CanaryCert{Cert: &x509.Certificate{}, IssuerCert: &x509.Certificate{}}
+	if err := r.validateOCSPStaple([]byte("not-an-ocsp-response"), cert, ocsp.Revoked); err == nil {
+		t.Fatal("malformed OCSP bytes were accepted as a publication boundary")
+	}
 }
 
 func TestPollOneHonorsMaxAttempts(t *testing.T) {

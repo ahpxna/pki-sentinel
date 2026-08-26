@@ -187,11 +187,10 @@ func (r *Runner) updateLatestCycleFile(name string, contents []byte) error {
 // explicitly replaceable convenience pointers.
 func writeAtomicPrivateFile(path string, contents []byte, replace bool) error {
 	if !replace {
-		if _, err := os.Lstat(path); err == nil {
-			return fmt.Errorf("evidence file already exists: %s", path)
-		} else if !os.IsNotExist(err) {
-			return err
-		}
+		// O_EXCL makes the no-replacement property atomic. A prior Lstat
+		// followed by Rename is a TOCTOU: on Unix Rename replaces a target
+		// created by a concurrent writer between those operations.
+		return writeNewPrivateFile(path, contents)
 	}
 	temporary, err := os.CreateTemp(filepath.Dir(path), ".evidence-*")
 	if err != nil {
