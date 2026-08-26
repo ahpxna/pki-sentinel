@@ -106,8 +106,12 @@ services:
           if echo "$$status" | grep -qi 'initialized.*false'; then
             vault operator init -key-shares=1 -key-threshold=1 -format=json > /vault/seal/init.json
             sed -n 's/.*"root_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /vault/seal/init.json > /vault/seal/root-token
-            sed -n 's/.*"keys_base64"[[:space:]]*:[[:space:]]*\["\([^"]*\)".*/\1/p' /vault/seal/init.json > /vault/seal/unseal-key
+            sed -n '/"keys_base64"[[:space:]]*:/ { n; s/.*"\([^"]*\)".*/\1/p; }' /vault/seal/init.json > /vault/seal/unseal-key
             chmod 0600 /vault/seal/init.json /vault/seal/root-token /vault/seal/unseal-key
+            if [ ! -s /vault/seal/root-token ] || [ ! -s /vault/seal/unseal-key ]; then
+              echo "vault-seal init did not produce persistent credentials" >&2
+              exit 1
+            fi
             vault operator unseal "$$(cat /vault/seal/unseal-key)" >/dev/null
             break
           fi
