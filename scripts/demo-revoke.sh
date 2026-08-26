@@ -6,7 +6,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPORT_PATH="${REPO_ROOT}/.data/last-cycle.json"
 ATTESTATION_DIR="${REPO_ROOT}/.data/attestation"
-ATTESTATION_PATH="${ATTESTATION_DIR}/last-cycle.attestation.json"
 mkdir -p "$(dirname "${REPORT_PATH}")"
 
 ARGS=(run --once --output json)
