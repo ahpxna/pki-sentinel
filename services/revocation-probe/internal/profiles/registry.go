@@ -560,6 +560,9 @@ func crlCheck() Profile {
 			if err := crl.CheckSignatureFrom(issuerCert); err != nil {
 				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, ReasonInvalidStatus)), nil
 			}
+			if reason := validateCRLIssuer(crl, issuerCert); reason != "" {
+				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, reason)), nil
+			}
 			now := time.Now()
 			if reason := checkCRLFreshness(crl, now, target.StatusFreshness, target.CRLFreshness); reason != "" {
 				return withCRL(inProcessObservation("go-crl-oracle", DecisionReject, reason)), nil
@@ -619,6 +622,28 @@ func checkOCSPFreshness(response *ocsp.Response, now time.Time, configuredStatus
 	}
 	if now.After(response.NextUpdate) {
 		return ReasonStaleStatus
+	}
+	return ""
+}
+
+func validateCRLIssuer(crl *x509.RevocationList, issuer *x509.Certificate) Reason {
+	if crl == nil || issuer == nil {
+		return ReasonInvalidStatus
+	}
+	// CheckSignatureFrom proves that issuer's public key can verify the CRL,
+	// but public keys may legitimately be reused across distinct CA
+	// certificates. Bind the CRL to the exact issuer identity as well so a CRL
+	// issued under a different CA name cannot become ground truth merely because
+	// both certificates carry the same key.
+	if !bytes.Equal(crl.RawIssuer, issuer.RawSubject) {
+		return ReasonInvalidStatus
+	}
+	// RFC 5280 uses the CRL Authority Key Identifier to identify the signing
+	// key. When both identifiers are present, require them to agree. Absence is
+	// tolerated for compatibility with older/private PKIs, but disagreement is
+	// never applicable to this issuer.
+	if len(crl.AuthorityKeyId) > 0 && len(issuer.SubjectKeyId) > 0 && !bytes.Equal(crl.AuthorityKeyId, issuer.SubjectKeyId) {
+		return ReasonInvalidStatus
 	}
 	return ""
 }

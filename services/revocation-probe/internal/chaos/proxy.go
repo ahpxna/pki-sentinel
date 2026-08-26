@@ -39,7 +39,9 @@ const (
 )
 
 // Fault configures one responder behavior. Delay is used by delay and timeout
-// modes. A timeout with no duration waits until the caller cancels the request.
+// modes. A timeout with a duration holds the connection for that interval and
+// then closes it without an HTTP response; with no duration it waits until the
+// caller cancels the request.
 type Fault struct {
 	Mode  FaultMode
 	Delay time.Duration
@@ -116,7 +118,13 @@ func StartLatencyProxy(upstreamBase, allowedPath string) (*LatencyProxy, error) 
 			closeConnection(w, false)
 		case FaultTimeout:
 			if fault.Delay > 0 {
-				_ = waitForRequest(r, fault.Delay)
+				if waitForRequest(r, fault.Delay) {
+					// Returning from a net/http handler without writing a response
+					// produces an implicit 200. A timeout fault must therefore
+					// terminate the connection after the hold interval without
+					// publishing any HTTP status.
+					closeConnection(w, false)
+				}
 				return
 			}
 			<-r.Context().Done()

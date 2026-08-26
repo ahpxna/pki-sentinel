@@ -17,7 +17,13 @@ meaning of existing measurements.
   Failures in secondary archive/attestation sinks are returned as errors but do
   not suppress the canonical report on stdout.
 - Per-cycle report and attestation files use atomic create-without-replacement;
-  only the explicit `last-cycle*` convenience copies are replaceable.
+  only the explicit `last-cycle*` convenience copies are replaceable. Evidence
+  paths are opened through a rooted filesystem handle and symlinked child
+  directories are rejected, so retained artifacts cannot escape the configured
+  evidence root.
+- CRL evidence is applicable only when its signature verifies under the
+  configured issuer and its encoded issuer identity matches that CA (with
+  AKI/SKI agreement enforced when both are present).
 - Scenario conformance describes observed baseline behavior. Policy conformance
   is separately recorded and may be enforced only when the deployment enables
   `policy.enforce`.

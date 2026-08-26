@@ -44,6 +44,15 @@ func TestSPKIHashIsStableAndKeySpecific(t *testing.T) {
 	}
 }
 
+func TestNativeMacOSTrustStoreFailsClosed(t *testing.T) {
+	if err := nativeTrustStoreSupport("darwin"); err == nil || !strings.Contains(err.Error(), "effective trust settings") {
+		t.Fatalf("native macOS certificate inventory was accepted: %v", err)
+	}
+	if err := nativeTrustStoreSupport("linux"); err != nil {
+		t.Fatalf("linux trust store unexpectedly rejected: %v", err)
+	}
+}
+
 func TestParseFlag(t *testing.T) {
 	if got := parseFlag([]string{"-b", "custom.json"}, "-b", "default.json"); got != "custom.json" {
 		t.Fatalf("got %q", got)
@@ -153,6 +162,64 @@ func TestBaselineStateRequiresExistingParentDirectory(t *testing.T) {
 	baseline := Baseline{GeneratedAt: time.Now().UTC(), Sequence: 1, ExpiresAt: time.Now().Add(time.Hour)}
 	if err := verifyAndAdvanceBaselineState(baseline, statePath); err == nil {
 		t.Fatal("missing state parent directory was silently created")
+	}
+}
+
+func TestBaselineStateSerializesConcurrentAdvance(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "baseline.state")
+	now := time.Now().UTC()
+	sequence1 := Baseline{GeneratedAt: now, Sequence: 1, ExpiresAt: now.Add(time.Hour)}
+	if err := verifyAndAdvanceBaselineState(sequence1, statePath); err != nil {
+		t.Fatal(err)
+	}
+	digest1, err := baselineDigest(sequence1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence2 := Baseline{GeneratedAt: now.Add(time.Second), Sequence: 2, PreviousDigest: digest1, ExpiresAt: now.Add(time.Hour)}
+	digest2, err := baselineDigest(sequence2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence3 := Baseline{GeneratedAt: now.Add(2 * time.Second), Sequence: 3, PreviousDigest: digest2, ExpiresAt: now.Add(time.Hour)}
+
+	enteredWrite := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	seq2Done := make(chan error, 1)
+	go func() {
+		seq2Done <- verifyAndAdvanceBaselineStateWithHook(sequence2, statePath, func() {
+			close(enteredWrite)
+			<-releaseWrite
+		})
+	}()
+	<-enteredWrite
+
+	seq3Done := make(chan error, 1)
+	go func() { seq3Done <- verifyAndAdvanceBaselineState(sequence3, statePath) }()
+	select {
+	case err := <-seq3Done:
+		t.Fatalf("sequence 3 bypassed in-flight state transaction: %v", err)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: the sequence-2 writer still owns the transaction lock.
+	}
+	close(releaseWrite)
+	if err := <-seq2Done; err != nil {
+		t.Fatalf("sequence 2 advance failed: %v", err)
+	}
+	if err := <-seq3Done; err != nil {
+		t.Fatalf("sequence 3 advance failed after lock release: %v", err)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state BaselineState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.HighestSequence != 3 {
+		t.Fatalf("final highest sequence=%d, want 3", state.HighestSequence)
 	}
 }
 

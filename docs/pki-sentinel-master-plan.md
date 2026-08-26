@@ -964,7 +964,7 @@ curl -su admin:${GRAFANA_ADMIN_PASSWORD} localhost:3000/api/datasources | jq -e 
 
 **Action:** A small agent that enumerates the host trust store, computes SHA-256 over each root's SubjectPublicKeyInfo, and compares against a signed baseline.
 
-Platform paths to support: `/etc/ssl/certs/ca-certificates.crt` and `/usr/local/share/ca-certificates/` (Debian/Ubuntu), `/etc/pki/ca-trust/` (RHEL), and macOS via `security dump-trust-settings -d` / `security find-certificate -a -p /Library/Keychains/System.keychain` when run natively.
+Platform paths in v1: `/etc/ssl/certs/ca-certificates.crt` and `/usr/local/share/ca-certificates/` (Debian/Ubuntu), plus `/etc/pki/ca-trust/` (RHEL). Native macOS must remain fail-closed until the implementation evaluates effective `security dump-trust-settings` policy as well as Keychain certificate inventory; `find-certificate` alone is not a trust-store oracle.
 
 Behaviour:
 - `baseline` subcommand: writes `truststore-baseline.json` (list of SPKI hashes + subjects).
@@ -1117,15 +1117,26 @@ make test-integration        # local
 
 **Target file:** `.github/workflows/release.yml`
 
-**Action:** Trigger on tag `v*`. Permissions: `contents: write`, `packages: write`, `id-token: write` (required for keyless signing).
+**Action:** Trigger on tag `v*`, but treat a tag as a release request rather than
+proof that the tagged commit is safe to publish.
 
-1. `docker/setup-buildx-action`, `docker/login-action` → `ghcr.io`.
-2. Build and push all three service images, multi-arch `linux/amd64,linux/arm64`, tagged with the git tag and the commit SHA.
-3. `anchore/sbom-action` (syft) → SPDX JSON per image → attach to the GitHub Release.
-4. `sigstore/cosign-installer` → `cosign sign --yes ghcr.io/OWNER/pki-sentinel/<svc>@<digest>` using the workflow's OIDC identity (**keyless** — no private key in secrets).
-5. `cosign attest --predicate sbom.spdx.json --type spdxjson --yes <digest>`.
-6. Generate SLSA provenance via `slsa-framework/slsa-github-generator`.
-7. Publish release notes generated from Conventional Commits.
+1. Re-run the repository `ci` and `security-scan` workflows for the exact tag
+   commit through reusable `workflow_call` gates. The registry/OIDC-capable
+   build jobs do not start unless both gates pass.
+2. Build all three service images multi-arch (`linux/amd64,linux/arm64`) and
+   push only immutable, untagged digests first. A failed matrix therefore does
+   not publish a version/SHA release tag for the services that happened to
+   finish earlier.
+3. `anchore/sbom-action` scans `image@sha256:<digest>` rather than a mutable
+   version tag and emits SPDX JSON per image.
+4. `sigstore/cosign-installer` signs the same immutable digest using the
+   workflow's OIDC identity (**keyless** — no private key in secrets).
+5. `cosign attest` binds the digest-addressed SBOM to that same digest, and
+   GitHub build provenance is emitted for the digest as well.
+6. After every service digest exists and is inspectable, a promotion job moves
+   those verified digests to both the git-tag and commit-SHA tags.
+7. Only after promotion succeeds does the finalizer create the GitHub Release
+   and attach the staged SBOMs.
 
 Add verification instructions to the README so a reviewer can actually check the signature:
 ```bash
@@ -1134,7 +1145,9 @@ cosign verify ghcr.io/OWNER/pki-sentinel/revocation-probe:v0.1.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-**Verification:** tag `v0.0.1-rc1` on a branch, confirm release assets contain SBOMs and `cosign verify` succeeds against the pushed image.
+**Verification:** tag `v0.0.1-rc1`, confirm the tag-triggered CI/security gates
+are green for the exact tag SHA, release assets contain the digest-derived
+SBOMs, and `cosign verify` succeeds against each promoted image.
 
 ---
 

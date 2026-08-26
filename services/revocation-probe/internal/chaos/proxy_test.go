@@ -103,9 +103,16 @@ func TestLatencyProxyInjectsResponderFaults(t *testing.T) {
 	if err := proxy.SetFault(Fault{Mode: FaultTimeout, Delay: 100 * time.Millisecond}); err != nil {
 		t.Fatal(err)
 	}
-	client := &http.Client{Timeout: 20 * time.Millisecond}
+	// The client timeout intentionally exceeds the injected hold. The proxy
+	// itself must still avoid returning net/http's implicit 200 after the
+	// handler delay elapses.
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	started := time.Now()
 	if _, err := client.Get(proxy.URL() + "/v1/pki_int/ocsp"); err == nil { // #nosec G107 -- local test server
 		t.Fatal("timeout fault unexpectedly returned a response")
+	}
+	if elapsed := time.Since(started); elapsed < 80*time.Millisecond {
+		t.Fatalf("timeout fault closed too early: %s", elapsed)
 	}
 
 	if err := proxy.SetFault(Fault{Mode: FaultDrop}); err != nil {

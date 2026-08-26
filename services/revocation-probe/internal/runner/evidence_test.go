@@ -236,3 +236,37 @@ func TestArchiveCycleReportConcurrentWritersCannotReplaceWinner(t *testing.T) {
 		t.Fatalf("immutable archive content=%q, want winning payload %q", contents, payloads[winner])
 	}
 }
+
+func TestPersistEvidenceRejectsSymlinkedParentEscape(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	evidenceDir := filepath.Join(base, "evidence")
+	outside := filepath.Join(base, "outside")
+	if err := os.Mkdir(evidenceDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(evidenceDir, "cycle-symlink", "curl-default")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(parent, "post_revocation")); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &Runner{EvidenceDir: evidenceDir}
+	results := []profiles.Result{{
+		Profile: "curl-default",
+		Evidence: profiles.CommandEvidence{RawArtifacts: []profiles.RawArtifact{{
+			Name: "stderr.txt", MediaType: "text/plain", Data: "must stay inside evidence root",
+		}}},
+	}}
+	if err := r.persistEvidence("cycle-symlink", results); err == nil {
+		t.Fatal("symlinked evidence parent was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "stderr.txt")); !os.IsNotExist(err) {
+		t.Fatalf("evidence escaped root through symlink: stat err=%v", err)
+	}
+}

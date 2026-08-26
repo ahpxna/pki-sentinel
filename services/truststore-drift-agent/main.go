@@ -25,7 +25,6 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -687,9 +686,24 @@ func baselineDigest(b Baseline) (string, error) {
 }
 
 func verifyAndAdvanceBaselineState(baseline Baseline, statePath string) error {
+	return verifyAndAdvanceBaselineStateWithHook(baseline, statePath, nil)
+}
+
+func verifyAndAdvanceBaselineStateWithHook(baseline Baseline, statePath string, beforeWrite func()) error {
 	if statePath == "" {
 		return fmt.Errorf("baseline state path is required for rollback protection")
 	}
+	// The rollback state is a read/validate/write transaction. Atomic rename
+	// protects crash consistency but does not serialize concurrent writers: a
+	// stale process can otherwise validate sequence N, pause, and later replace
+	// an already-published N+1 state with N. Hold a cross-process lock across
+	// the entire transaction so HighestSequence is monotonic in real time.
+	unlock, err := acquireBaselineStateLock(statePath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unlock() }()
+
 	digest, err := baselineDigest(baseline)
 	if err != nil {
 		return fmt.Errorf("hash baseline: %w", err)
@@ -723,6 +737,9 @@ func verifyAndAdvanceBaselineState(baseline Baseline, statePath string) error {
 	data, err := json.Marshal(BaselineState{HighestSequence: baseline.Sequence, Digest: digest})
 	if err != nil {
 		return fmt.Errorf("encode baseline state: %w", err)
+	}
+	if beforeWrite != nil {
+		beforeWrite()
 	}
 	if err := writeBaselineStateAtomic(root, stateName, data); err != nil {
 		return fmt.Errorf("write baseline state: %w", err)
@@ -928,40 +945,34 @@ func keyUsageNames(usage x509.KeyUsage) []string {
 	return names
 }
 
+func nativeTrustStoreSupport(goos string) error {
+	if goos == "darwin" {
+		return fmt.Errorf("loadTrustStore: native macOS effective trust settings are not implemented; refusing certificate-inventory-only scan")
+	}
+	return nil
+}
+
 // loadTrustStore enumerates trusted root CAs from the platform-appropriate
 // location(s):
 //   - Debian/Ubuntu: /etc/ssl/certs/ca-certificates.crt,
 //     /usr/local/share/ca-certificates/
 //   - RHEL: /etc/pki/ca-trust/
-//   - macOS (native only): `security dump-trust-settings -d` /
-//     `security find-certificate -a -p /Library/Keychains/System.keychain`
+//
+// Native macOS intentionally fails closed for now. Enumerating certificates
+// with `security find-certificate` does not enumerate the effective trust
+// settings attached to those certificates, so treating Keychain inventory as
+// the trust store can both miss policy changes and report untrusted
+// certificates as roots.
 func loadTrustStore(extraCADir string) ([]*x509.Certificate, error) {
+	if err := nativeTrustStoreSupport(runtime.GOOS); err != nil {
+		return nil, err
+	}
 	var candidates []string
 	var certs []*x509.Certificate
 	found := false
-	switch runtime.GOOS {
-	case "darwin":
-		// With no explicit keychain, security searches the user's configured
-		// keychain list. Include Apple's immutable system roots explicitly as
-		// they are not guaranteed to be in that list in non-interactive jobs.
-		commands := [][]string{
-			{"find-certificate", "-a", "-p"},
-			{"find-certificate", "-a", "-p", "/System/Library/Keychains/SystemRootCertificates.keychain"},
-			{"find-certificate", "-a", "-p", "/Library/Keychains/System.keychain"},
-		}
-		for _, args := range commands {
-			data, err := exec.Command("security", args...).Output()
-			if err != nil {
-				continue
-			}
-			found = true
-			certs = appendPEMCertificates(certs, data)
-		}
-	default:
-		candidates = []string{
-			"/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu bundle
-			"/etc/pki/tls/certs/ca-bundle.crt",   // RHEL bundle
-		}
+	candidates = []string{
+		"/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu bundle
+		"/etc/pki/tls/certs/ca-bundle.crt",   // RHEL bundle
 	}
 
 	for _, path := range candidates {
@@ -977,10 +988,7 @@ func loadTrustStore(extraCADir string) ([]*x509.Certificate, error) {
 	// /usr/local/share/ca-certificates/ before `update-ca-certificates`
 	// folds them into the bundle above; scan it too so drift is visible
 	// even before that step completes.
-	dirs := []string{extraCADir}
-	if runtime.GOOS != "darwin" {
-		dirs = append(dirs, "/etc/pki/ca-trust/source/anchors", "/etc/pki/ca-trust/extracted/pem")
-	}
+	dirs := []string{extraCADir, "/etc/pki/ca-trust/source/anchors", "/etc/pki/ca-trust/extracted/pem"}
 	for _, dir := range dirs {
 		root, err := os.OpenRoot(dir)
 		if err != nil {

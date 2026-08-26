@@ -8,7 +8,19 @@ permissions:
   contents: read
 
 jobs:
+  ci-gate:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  security-gate:
+    uses: ./.github/workflows/security-scan.yml
+    permissions:
+      contents: read
+      security-events: write
+
   build:
+    needs: [ci-gate, security-gate]
     runs-on: ubuntu-latest
     permissions:
       attestations: write
@@ -31,21 +43,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: build and push
+      - name: build and push immutable digest
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: services/${{ matrix.service }}
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/pki-sentinel/${{ matrix.service }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/pki-sentinel/${{ matrix.service }}:${{ github.sha }}
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/pki-sentinel/${{ matrix.service }},push-by-digest=true,name-canonical=true,push=true
 
-      - name: generate SBOM (SPDX)
+      - name: generate SBOM (SPDX) from immutable digest
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: ghcr.io/${{ github.repository_owner }}/pki-sentinel/${{ matrix.service }}:${{ github.ref_name }}
+          image: ghcr.io/${{ github.repository_owner }}/pki-sentinel/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           format: spdx-json
           output-file: ${{ matrix.service }}-sbom.spdx.json
 
@@ -68,16 +77,63 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-      - name: stage SBOM for release finalizer
+      - name: stage immutable digest and SBOM
+        run: printf '%s\n' '${{ steps.build.outputs.digest }}' > '${{ matrix.service }}.digest'
+
+      - name: upload release metadata
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-sbom-${{ matrix.service }}
-          path: ${{ matrix.service }}-sbom.spdx.json
+          name: release-metadata-${{ matrix.service }}
+          path: |
+            ${{ matrix.service }}.digest
+            ${{ matrix.service }}-sbom.spdx.json
           if-no-files-found: error
           retention-days: 1
 
-  finalize-release:
+  promote:
     needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: download immutable release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-metadata-*
+          path: release-assets
+          merge-multiple: true
+      - name: verify all digests exist before publishing release tags
+        run: |
+          set -euo pipefail
+          for service in demo-api revocation-probe truststore-drift-agent; do
+            digest_file="release-assets/${service}.digest"
+            test -s "$digest_file"
+            digest="$(cat "$digest_file")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            docker buildx imagetools inspect \
+              "ghcr.io/${{ github.repository_owner }}/pki-sentinel/${service}@${digest}" >/dev/null
+          done
+      - name: promote verified digests to release tags
+        run: |
+          set -euo pipefail
+          for service in demo-api revocation-probe truststore-drift-agent; do
+            digest="$(cat "release-assets/${service}.digest")"
+            image="ghcr.io/${{ github.repository_owner }}/pki-sentinel/${service}"
+            docker buildx imagetools create \
+              --tag "${image}:${{ github.ref_name }}" \
+              --tag "${image}:${{ github.sha }}" \
+              "${image}@${digest}"
+          done
+
+  finalize-release:
+    needs: promote
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -85,7 +141,7 @@ jobs:
       - name: download staged SBOMs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: release-sbom-*
+          pattern: release-metadata-*
           path: release-assets
           merge-multiple: true
 

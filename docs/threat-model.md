@@ -36,7 +36,9 @@ table and the README's "Production notes" — read all three together.
 ## Out of scope for this repo (v1)
 
 - Kubernetes/Helm hardening (see [ADR-0005](adr/0005-compose-over-kubernetes.md); roadmap item).
-- Windows client trust-store drift detection (roadmap item; `truststore-drift-agent`
-  currently supports Debian/Ubuntu and RHEL paths, with macOS native paths
-  documented but not implemented in the containerized demo path).
+- Windows client trust-store drift detection (roadmap item). Native macOS
+  effective-trust evaluation is also a roadmap item: the agent intentionally
+  fails closed on macOS rather than treating Keychain certificate inventory as
+  equivalent to trust settings. Debian/Ubuntu and RHEL trust-store paths are
+  the supported v1 runtime targets.
 - Multi-region / disaster-recovery topology for Vault Raft storage.

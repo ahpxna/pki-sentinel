@@ -7,9 +7,12 @@ the certificate digest as the authoritative identity, so one certificate
 cannot hide removal of a different certificate that reuses the same public
 key; SPKI-only matching is retained only for legacy baselines. Baselines are
 signed with Ed25519; checks fail closed if the JSON is changed or the matching
-public key is unavailable. Runtime scans detect added, removed, changed,
-expired, and expiring roots. Keep the private signing key offline and pin the
-verification key outside the monitored endpoint in production.
+public key is unavailable. The local anti-rollback state serializes its entire
+read/validate/write transaction with an inter-process lock so a stale writer
+cannot move the accepted sequence backward after a newer baseline was already
+published. Runtime scans detect added, removed, changed, expired, and expiring
+roots. Keep the private signing key offline and pin the verification key
+outside the monitored endpoint in production.
 
 ## Why this exists
 
@@ -36,6 +39,10 @@ truststore-drift-agent serve -b truststore-baseline.json \
 `check` exits 1 on policy drift and 2 when the baseline or scan is invalid.
 `serve` exposes `/metrics`, `/events`, `/healthz`, and `/readyz`; Prometheus
 scrapes this path in `make up-full`.
-Linux certificate bundles/local CA directories and native macOS Keychains are
-supported. `--extra-ca-dir <path>` can point both commands at an isolated CA
-directory for tests or nonstandard installations.
+Linux certificate bundles/local CA directories are supported. Native macOS
+currently fails closed because certificate inventory from Keychains is not the
+same as effective trust settings; treating `security find-certificate` output as
+trusted roots can miss trust-policy changes. macOS support remains a roadmap
+item until the agent evaluates trust settings as well as certificate bytes.
+`--extra-ca-dir <path>` can point both commands at an isolated CA directory for
+tests or nonstandard Linux installations.

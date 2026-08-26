@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -58,6 +59,15 @@ func (r *Runner) persistCommandEvidence(cycleID, profile, phase string, evidence
 		}
 		names[name] = struct{}{}
 	}
+	root, err := openEvidenceRoot(r.EvidenceDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	directory := filepath.Join(cycleID, profile, phase)
+	if err := ensurePrivateRootDir(root, directory); err != nil {
+		return fmt.Errorf("create evidence directory: %w", err)
+	}
 	for _, raw := range evidence.RawArtifacts {
 		contents, err := rawArtifactBytes(raw)
 		if err != nil {
@@ -65,16 +75,12 @@ func (r *Runner) persistCommandEvidence(cycleID, profile, phase string, evidence
 		}
 		digest := sha256.Sum256(contents)
 		name := safeArtifactName(raw.Name)
-		directory := filepath.Join(r.EvidenceDir, cycleID, profile, phase)
-		if err := ensurePrivateDir(directory); err != nil {
-			return fmt.Errorf("create evidence directory: %w", err)
-		}
-		path := filepath.Join(directory, name)
-		if err := writeNewPrivateFile(path, contents); err != nil {
-			return fmt.Errorf("write evidence %s: %w", path, err)
+		relPath := filepath.Join(directory, name)
+		if err := writeNewPrivateRootFile(root, relPath, contents); err != nil {
+			return fmt.Errorf("write evidence %s: %w", filepath.Join(r.EvidenceDir, relPath), err)
 		}
 		evidence.Artifacts = append(evidence.Artifacts, profiles.Artifact{
-			Path: filepath.ToSlash(filepath.Join(cycleID, profile, phase, name)), SHA256: hex.EncodeToString(digest[:]), MediaType: raw.MediaType,
+			Path: filepath.ToSlash(relPath), SHA256: hex.EncodeToString(digest[:]), MediaType: raw.MediaType,
 		})
 	}
 	sort.Slice(evidence.Artifacts, func(i, j int) bool { return evidence.Artifacts[i].Path < evidence.Artifacts[j].Path })
@@ -82,26 +88,92 @@ func (r *Runner) persistCommandEvidence(cycleID, profile, phase string, evidence
 	return nil
 }
 
-func ensurePrivateDir(path string) error {
-	_, statErr := os.Stat(path)
-	existed := statErr == nil
+func openEvidenceRoot(path string) (*os.Root, error) {
+	if path == "" {
+		return nil, fmt.Errorf("evidence directory is required")
+	}
 	if err := os.MkdirAll(path, 0o700); err != nil {
-		return err
+		return nil, fmt.Errorf("create evidence root: %w", err)
 	}
-	// MkdirAll does not change the mode of an existing directory.
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat evidence root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, fmt.Errorf("evidence root must be a real directory, got %s", info.Mode())
+	}
 	if err := os.Chmod(path, 0o700); err != nil {
-		return err
+		return nil, fmt.Errorf("restrict evidence root permissions: %w", err)
 	}
-	if !existed {
-		if err := syncDir(filepath.Dir(path)); err != nil {
-			return fmt.Errorf("sync parent directory: %w", err)
-		}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return nil, fmt.Errorf("open evidence root: %w", err)
 	}
-	return syncDir(path)
+	return root, nil
 }
 
-func syncDir(path string) error {
-	dir, err := os.Open(path)
+func ensurePrivateRootDir(root *os.Root, path string) error {
+	cleaned, err := cleanEvidenceRelativePath(path)
+	if err != nil {
+		return err
+	}
+	if cleaned == "." {
+		return syncRootDir(root, ".")
+	}
+	current := "."
+	for _, component := range strings.Split(cleaned, string(filepath.Separator)) {
+		parent := current
+		if current == "." {
+			current = component
+		} else {
+			current = filepath.Join(current, component)
+		}
+		info, statErr := root.Lstat(current)
+		created := false
+		switch {
+		case statErr == nil:
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("evidence directory component %q is a symbolic link", current)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("evidence directory component %q is not a directory", current)
+			}
+		case os.IsNotExist(statErr):
+			if err := root.Mkdir(current, 0o700); err != nil {
+				return err
+			}
+			created = true
+			info, statErr = root.Lstat(current)
+			if statErr != nil {
+				return statErr
+			}
+		default:
+			return statErr
+		}
+		if info.Mode().Perm() != 0o700 {
+			if err := root.Chmod(current, 0o700); err != nil {
+				return fmt.Errorf("restrict evidence directory %q permissions: %w", current, err)
+			}
+		}
+		if created {
+			if err := syncRootDir(root, parent); err != nil {
+				return fmt.Errorf("sync parent evidence directory %q: %w", parent, err)
+			}
+		}
+	}
+	return syncRootDir(root, cleaned)
+}
+
+func cleanEvidenceRelativePath(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("evidence path %q escapes evidence root", path)
+	}
+	return cleaned, nil
+}
+
+func syncRootDir(root *os.Root, path string) error {
+	dir, err := root.Open(path)
 	if err != nil {
 		return err
 	}
@@ -109,14 +181,18 @@ func syncDir(path string) error {
 	return dir.Sync()
 }
 
-func writeNewPrivateFile(path string, contents []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+func writeNewPrivateRootFile(root *os.Root, path string, contents []byte) error {
+	cleaned, err := cleanEvidenceRelativePath(path)
+	if err != nil {
+		return err
+	}
+	f, err := root.OpenFile(cleaned, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
 	cleanup := func(writeErr error) error {
 		_ = f.Close()
-		_ = os.Remove(path)
+		_ = root.Remove(cleaned)
 		return writeErr
 	}
 	if _, err := f.Write(contents); err != nil {
@@ -126,12 +202,13 @@ func writeNewPrivateFile(path string, contents []byte) error {
 		return cleanup(err)
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
+		_ = root.Remove(cleaned)
 		return err
 	}
-	if err := syncDir(filepath.Dir(path)); err != nil {
-		_ = os.Remove(path)
-		_ = syncDir(filepath.Dir(path))
+	parent := filepath.Dir(cleaned)
+	if err := syncRootDir(root, parent); err != nil {
+		_ = root.Remove(cleaned)
+		_ = syncRootDir(root, parent)
 		return fmt.Errorf("sync evidence directory: %w", err)
 	}
 	return nil
@@ -152,14 +229,15 @@ func (r *Runner) archiveCycleFile(cycleID, name string, contents []byte) error {
 	if r.EvidenceDir == "" {
 		return fmt.Errorf("evidence directory is required")
 	}
-	directory := filepath.Join(r.EvidenceDir, cycleID)
-	if err := ensurePrivateDir(directory); err != nil {
-		return fmt.Errorf("create cycle evidence directory: %w", err)
-	}
-	if err := writeAtomicPrivateFile(filepath.Join(directory, safeArtifactName(name)), contents, false); err != nil {
+	root, err := openEvidenceRoot(r.EvidenceDir)
+	if err != nil {
 		return err
 	}
-	return nil
+	defer root.Close()
+	if err := ensurePrivateRootDir(root, cycleID); err != nil {
+		return fmt.Errorf("create cycle evidence directory: %w", err)
+	}
+	return writeAtomicPrivateRootFile(root, filepath.Join(cycleID, safeArtifactName(name)), contents, false)
 }
 
 // UpdateLatestCycleReport and UpdateLatestCycleAttestation maintain atomic
@@ -176,47 +254,54 @@ func (r *Runner) updateLatestCycleFile(name string, contents []byte) error {
 	if r.EvidenceDir == "" {
 		return fmt.Errorf("evidence directory is required")
 	}
-	if err := ensurePrivateDir(r.EvidenceDir); err != nil {
-		return fmt.Errorf("create evidence directory: %w", err)
+	root, err := openEvidenceRoot(r.EvidenceDir)
+	if err != nil {
+		return err
 	}
-	return writeAtomicPrivateFile(filepath.Join(r.EvidenceDir, safeArtifactName(name)), contents, true)
+	defer root.Close()
+	return writeAtomicPrivateRootFile(root, safeArtifactName(name), contents, true)
 }
 
 // writeAtomicPrivateFile durably publishes an evidence file after its content
 // is synced. Immutable cycle files reject replacement; latest-cycle copies are
 // explicitly replaceable convenience pointers.
-func writeAtomicPrivateFile(path string, contents []byte, replace bool) error {
+func writeAtomicPrivateRootFile(root *os.Root, path string, contents []byte, replace bool) error {
+	cleaned, err := cleanEvidenceRelativePath(path)
+	if err != nil {
+		return err
+	}
 	if !replace {
 		// O_EXCL makes the no-replacement property atomic. A prior Lstat
 		// followed by Rename is a TOCTOU: on Unix Rename replaces a target
 		// created by a concurrent writer between those operations.
-		return writeNewPrivateFile(path, contents)
+		return writeNewPrivateRootFile(root, cleaned, contents)
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".evidence-*")
+	parent := filepath.Dir(cleaned)
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return fmt.Errorf("generate evidence temporary name: %w", err)
+	}
+	temporaryName := filepath.Join(parent, fmt.Sprintf(".evidence-%x", suffix))
+	temporary, err := root.OpenFile(temporaryName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
+	defer root.Remove(temporaryName)
 	if _, err := temporary.Write(contents); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryName, path); err != nil {
+	if err := root.Rename(temporaryName, cleaned); err != nil {
 		return err
 	}
-	return syncDir(filepath.Dir(path))
+	return syncRootDir(root, parent)
 }
 
 type cycleArtifact struct {
@@ -231,8 +316,12 @@ func (r *Runner) persistCycleArtifacts(cycleID string, artifacts map[string]cycl
 	if r.EvidenceDir == "" {
 		return nil, fmt.Errorf("evidence directory is required")
 	}
-	directory := filepath.Join(r.EvidenceDir, cycleID)
-	if err := ensurePrivateDir(directory); err != nil {
+	root, err := openEvidenceRoot(r.EvidenceDir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	if err := ensurePrivateRootDir(root, cycleID); err != nil {
 		return nil, fmt.Errorf("create cycle evidence directory: %w", err)
 	}
 	references := make([]profiles.Artifact, 0, len(artifacts))
@@ -249,7 +338,7 @@ func (r *Runner) persistCycleArtifacts(cycleID string, artifacts map[string]cycl
 			return nil, fmt.Errorf("cycle evidence has colliding artifact name %q", name)
 		}
 		seen[name] = struct{}{}
-		if err := writeNewPrivateFile(filepath.Join(directory, name), artifact.Contents); err != nil {
+		if err := writeNewPrivateRootFile(root, filepath.Join(cycleID, name), artifact.Contents); err != nil {
 			return nil, fmt.Errorf("write cycle artifact %s: %w", name, err)
 		}
 		digest := sha256.Sum256(artifact.Contents)

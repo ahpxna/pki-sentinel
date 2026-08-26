@@ -77,7 +77,11 @@ waits only for the evidence dependencies declared by the selected scenario.
 The controller rejects a scenario when an enabled client requires an OCSP/CRL
 publication boundary without an enabled status-oracle producer. At runtime the
 publication barrier itself also fails closed: completion without an observed
-`REJECT / REVOKED` does not release dependent clients. The report
+`REJECT / REVOKED` does not release dependent clients. CRL ground truth is
+bound to the configured issuing CA by both signature verification and issuer
+identity (plus AKI/SKI agreement when both identifiers are present), so a
+different CA certificate that reuses the same signing key cannot supply the
+experiment's CRL status. The report
 retains each profile's pre-revocation BEFORE observation, the acknowledgement
 timestamp, first OCSP/CRL revoked observations, staple publication, and a
 per-client first attempt/decision. It also derives separate propagation,
@@ -85,9 +89,11 @@ distribution, and stapled-client enforcement durations.
 
 Certificate material, OCSP/CRL DER, command stdout/stderr, client versions,
 TLS backends, exit codes, and content hashes are retained as access-controlled,
-content-addressed evidence artifacts. Their references and SHA-256 values are
-included in the JSON report; unbounded data remains excluded from Prometheus
-labels.
+content-addressed evidence artifacts. Evidence writes are rooted under the
+configured evidence directory and reject symlinked child directories, in
+addition to create-without-replacement for immutable files. Their references
+and SHA-256 values are included in the JSON report; unbounded data remains
+excluded from Prometheus labels.
 
 An optional Ed25519 attestation envelope signs a to-be-signed statement that
 binds the exact report SHA-256, issue time, non-empty run ID, canonical scenario

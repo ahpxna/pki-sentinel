@@ -1,9 +1,14 @@
 package profiles
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -143,6 +148,62 @@ func TestCheckRevocationTimeRejectsFutureAndImpossibleValues(t *testing.T) {
 	}
 	if got := checkRevocationTime(notBefore.Add(-6*time.Minute), notBefore, now, policy); got != ReasonInvalidStatus {
 		t.Fatalf("pre-certificate revocation time classified %s", got)
+	}
+}
+
+func TestValidateCRLIssuerRejectsDifferentCAThatReusesSigningKey(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeCA := func(commonName string, serial int64, ski byte) (*x509.Certificate, []byte) {
+		t.Helper()
+		template := &x509.Certificate{
+			SerialNumber:          big.NewInt(serial),
+			Subject:               pkix.Name{CommonName: commonName},
+			NotBefore:             now.Add(-time.Hour),
+			NotAfter:              now.Add(24 * time.Hour),
+			IsCA:                  true,
+			BasicConstraintsValid: true,
+			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			SubjectKeyId:          []byte{ski},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cert, der
+	}
+	issuerA, _ := makeCA("Issuer A", 1, 0xA1)
+	issuerB, _ := makeCA("Issuer B", 2, 0xB2)
+	crlDER, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(1),
+		ThisUpdate: now.Add(-time.Minute),
+		NextUpdate: now.Add(time.Hour),
+	}, issuerB, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crl, err := x509.ParseRevocationList(crlDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This is the regression precondition: signature verification alone cannot
+	// distinguish the two CA certificates because they intentionally reuse K.
+	if err := crl.CheckSignatureFrom(issuerA); err != nil {
+		t.Fatalf("shared-key CRL did not reproduce signature ambiguity: %v", err)
+	}
+	if got := validateCRLIssuer(crl, issuerA); got != ReasonInvalidStatus {
+		t.Fatalf("CRL from a different CA name classified %s, want %s", got, ReasonInvalidStatus)
+	}
+	if got := validateCRLIssuer(crl, issuerB); got != "" {
+		t.Fatalf("CRL from the actual issuer classified %s", got)
 	}
 }
 
