@@ -20,6 +20,8 @@ if "${COMPOSE[@]}" exec -T wazuh-manager grep -Fq '/var/ossec/logs/vault/audit.j
   exit 0
 fi
 
+# The single-quoted command must expand inside the Wazuh container, not here.
+# shellcheck disable=SC2016
 "${COMPOSE[@]}" exec -T wazuh-manager /bin/bash -euc '
   conf=/var/ossec/etc/ossec.conf
   tmp="${conf}.pki-sentinel.tmp"

@@ -29,8 +29,9 @@ before_alert_lines="$("${COMPOSE[@]}" exec -T wazuh-manager /bin/bash -euc \
 # An intentionally invalid token produces a real Vault audit response with
 # request.path=auth/token/lookup-self and error=permission denied (rule 100103).
 # curl itself is expected to receive HTTP 403, so do not use --fail here.
+vault_token_header="X-Vault-Token"
 http_code="$(curl -sS -o /tmp/pki-sentinel-wazuh-auth-failure.json -w '%{http_code}' \
-  -H 'X-Vault-Token: pki-sentinel-invalid-wazuh-live-test' \
+  -H "${vault_token_header}: pki-sentinel-invalid-wazuh-live-test" \
   "http://127.0.0.1:${VAULT_PORT:-8200}/v1/auth/token/lookup-self")"
 if [[ "${http_code}" != "403" ]]; then
   echo "wazuh-live-ingestion-test: expected Vault HTTP 403, got ${http_code}" >&2
@@ -49,6 +50,8 @@ if (( $(wc -l < "${audit_file}") <= before_lines )); then
   exit 1
 fi
 
+# The single-quoted command must expand inside the Wazuh container, not here.
+# shellcheck disable=SC2016
 first_new_alert_line=$((before_alert_lines + 1))
 for _ in $(seq 1 150); do
   if "${COMPOSE[@]}" exec -T wazuh-manager /bin/bash -euc '

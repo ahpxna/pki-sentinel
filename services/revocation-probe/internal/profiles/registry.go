@@ -656,14 +656,6 @@ func verifyPresentedLeaf(target Target, leaf *x509.Certificate) (string, error) 
 	return presented, nil
 }
 
-func fetchLeafPEM(ctx context.Context, target Target) ([]byte, error) {
-	leaf, _, err := fetchPresentedLeaf(ctx, target)
-	if err != nil {
-		return nil, err
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}), nil
-}
-
 var statusHTTPClient = &http.Client{
 	Timeout: 10 * time.Second,
 	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {

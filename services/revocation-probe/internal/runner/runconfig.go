@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sort"
-	"time"
 
 	"github.com/ahpxna/pki-sentinel/services/revocation-probe/internal/profiles"
 )
@@ -149,11 +148,4 @@ func digestJSON(value any) (string, error) {
 	}
 	sum := sha256.Sum256(canonical)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
-}
-
-func durationAge(now, then time.Time) time.Duration {
-	if now.IsZero() || then.IsZero() {
-		return 0
-	}
-	return now.Sub(then)
 }
