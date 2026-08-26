@@ -175,7 +175,7 @@ jobs:
           done
       - name: verify seal restart refreshes an expired transit token
         run: |
-          stale_token="$(<.data/vault-seal-runtime/transit-token)"
+          stale_token="$(docker compose exec -T vault cat /run/vault-seal/transit-token)"
           docker compose exec -T vault-seal sh -ec '
             export VAULT_ADDR=http://127.0.0.1:8200
             export VAULT_TOKEN="$(cat /vault/seal/root-token)"
@@ -185,8 +185,9 @@ jobs:
           source scripts/lib/wait_for.sh
           wait_for_cmd 60 docker compose exec -T vault-seal vault status
           docker compose up --force-recreate --no-deps vault-seal-init
-          test -s .data/vault-seal-runtime/transit-token
-          test "$(<.data/vault-seal-runtime/transit-token)" != "${stale_token}"
+          new_token="$(docker compose exec -T vault cat /run/vault-seal/transit-token)"
+          test -n "${new_token}"
+          test "${new_token}" != "${stale_token}"
           docker compose restart vault
           wait_for_http "http://localhost:8200/v1/sys/health?standbyok=true" 90 '^2[0-9][0-9]$'
       - name: build probe + truststore-drift-agent binaries
