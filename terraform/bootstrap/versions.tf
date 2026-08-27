@@ -3,7 +3,7 @@ terraform {
   required_providers {
     vault = {
       source  = "hashicorp/vault"
-      version = "~> 4.3"
+      version = "~> 5.11"
     }
     tls = {
       source  = "hashicorp/tls"
