@@ -5,6 +5,7 @@ package issuer
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -147,6 +148,10 @@ func (c *Client) IssueCanary(ctx context.Context, cn string) (*CanaryCert, error
 		return nil, fmt.Errorf("issuer: issue canary: %w", err)
 	}
 
+	if secret == nil || secret.Data == nil {
+		return nil, fmt.Errorf("issuer: issue canary returned no certificate data")
+	}
+
 	certPEM, _ := secret.Data["certificate"].(string)
 	keyPEM, _ := secret.Data["private_key"].(string)
 	serial, _ := secret.Data["serial_number"].(string)
@@ -167,6 +172,12 @@ func (c *Client) IssueCanary(ctx context.Context, cn string) (*CanaryCert, error
 	issuerCert, err := x509.ParseCertificate(issuerBlock.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("issuer: parsing issuing CA certificate: %w", err)
+	}
+	if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err != nil {
+		return nil, fmt.Errorf("issuer: invalid canary key pair: %w", err)
+	}
+	if err := cert.CheckSignatureFrom(issuerCert); err != nil {
+		return nil, fmt.Errorf("issuer: canary certificate is not signed by issuing CA: %w", err)
 	}
 	if err := verifyIssuedSerial(serial, cert.SerialNumber); err != nil {
 		return nil, fmt.Errorf("issuer: inconsistent canary serial: %w", err)

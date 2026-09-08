@@ -72,6 +72,11 @@ if [[ "${SEALED}" != "false" ]]; then
 fi
 echo "[bootstrap]     sealed=false — auto-unseal confirmed."
 
+token_lookup_status() {
+  curl -sS --connect-timeout 3 --max-time 5 -o /dev/null -w '%{http_code}' \
+    --header "X-Vault-Token: $1" "${VAULT_ADDR}/v1/auth/token/lookup-self"
+}
+
 token_is_valid() {
   local token="$1"
   [[ -n "${token}" ]] || return 1
@@ -81,8 +86,7 @@ token_is_valid() {
   # transient 403 is not mistaken for a revoked root token.
   local attempt status
   for ((attempt = 1; attempt <= 15; attempt++)); do
-    status="$(curl -s -o /dev/null -w '%{http_code}' \
-      --header "X-Vault-Token: ${token}" "${VAULT_ADDR}/v1/auth/token/lookup-self")"
+    status="$(token_lookup_status "${token}")"
     if [[ "${status}" == "200" ]]; then
       return 0
     fi
@@ -159,6 +163,9 @@ echo "[bootstrap] 6/9 running Terraform in ${TF_MODE} mode..."
   export TF_VAR_vault_addr="${VAULT_ADDR}"
   terraform init -input=false
   if [[ "${TF_MODE}" == "bootstrap-admin" ]]; then
+    # Finish audit setup before concurrent writes. Vault can otherwise commit
+    # a mount and then fail auditing its response, leaving it absent from state.
+    terraform apply -auto-approve -input=false -target=vault_audit.file
     terraform apply -auto-approve -input=false
   else
     "${TF_DAY2_SCRIPT}" apply -auto-approve -input=false
@@ -187,16 +194,35 @@ echo "[bootstrap] 8/9 revoking the root token (guard: PKI_SENTINEL_KEEP_ROOT=1 t
 if [[ "${KEEP_ROOT}" == "1" ]]; then
   echo "[bootstrap]     PKI_SENTINEL_KEEP_ROOT=1 set — keeping root token for local iteration."
 else
-  if token_is_valid "${ROOT_TOKEN}"; then
-    curl -s --request POST \
+  if ! root_status="$(token_lookup_status "${ROOT_TOKEN}")"; then
+    echo "[bootstrap] FATAL: could not determine whether the root token is still valid." >&2
+    exit 1
+  fi
+  if [[ "${root_status}" == "200" ]]; then
+    if ! revoke_status="$(curl -sS --connect-timeout 3 --max-time 10 \
+      -o /dev/null -w '%{http_code}' --request POST \
       --header "X-Vault-Token: ${ROOT_TOKEN}" \
-      "${VAULT_ADDR}/v1/auth/token/revoke-self" >/dev/null
+      "${VAULT_ADDR}/v1/auth/token/revoke-self")"; then
+      echo "[bootstrap] FATAL: root-token revocation request failed; revocation is unconfirmed." >&2
+      exit 1
+    fi
+    if [[ "${revoke_status}" != "204" ]]; then
+      echo "[bootstrap] FATAL: root-token revocation returned HTTP ${revoke_status}; expected 204." >&2
+      exit 1
+    fi
+    if ! root_status="$(token_lookup_status "${ROOT_TOKEN}")" || [[ "${root_status}" != "403" ]]; then
+      echo "[bootstrap] FATAL: could not confirm that the root token is now rejected." >&2
+      exit 1
+    fi
     echo "[bootstrap]"
     echo "[bootstrap] Root token revoked. Recovery keys are in .data/vault-init.json."
     echo "[bootstrap] To regain administrative access run 'vault operator generate-root'."
     echo "[bootstrap] See docs/runbooks/vault-seal-recovery.md."
-  else
+  elif [[ "${root_status}" == "403" ]]; then
     echo "[bootstrap]     initial root token was already revoked; no action required."
+  else
+    echo "[bootstrap] FATAL: root-token lookup returned HTTP ${root_status}; revocation is unknown." >&2
+    exit 1
   fi
 fi
 

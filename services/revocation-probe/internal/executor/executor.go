@@ -73,12 +73,44 @@ func Remote(profile profiles.Profile, baseURL string) profiles.Profile {
 		if err := decodeStrictJSON(response.Body, &observation); err != nil {
 			return profiles.Observation{}, fmt.Errorf("decode executor response: %w", err)
 		}
+		if err := validateObservation(observation); err != nil {
+			return profiles.Observation{}, fmt.Errorf("invalid executor response: %w", err)
+		}
 		if observation.HarnessError != "" {
 			return observation, fmt.Errorf("executor %s: %s", profile.Name, observation.HarnessError)
 		}
 		return observation, nil
 	}
 	return profile
+}
+
+// Remote executors send raw evidence; only the controller may create persisted
+// artifact references after validating and storing their contents.
+func validateObservation(observation profiles.Observation) error {
+	if len(observation.Evidence.Artifacts) != 0 {
+		return fmt.Errorf("executor supplied persisted artifact references")
+	}
+	switch observation.Decision {
+	case profiles.DecisionAccept, profiles.DecisionReject, profiles.DecisionInconclusive, profiles.DecisionHarnessError:
+	default:
+		return fmt.Errorf("unknown decision %q", observation.Decision)
+	}
+	switch observation.Reason {
+	case profiles.ReasonStatusGood, profiles.ReasonRevoked, profiles.ReasonExpired,
+		profiles.ReasonMissingStatus, profiles.ReasonInvalidStatus, profiles.ReasonStaleStatus,
+		profiles.ReasonFutureStatus, profiles.ReasonMissingFreshness, profiles.ReasonUnknownStatus,
+		profiles.ReasonNoRevocationCheck, profiles.ReasonNetworkFailure, profiles.ReasonTLSFailure,
+		profiles.ReasonClientPolicy, profiles.ReasonHarnessFailure:
+	default:
+		return fmt.Errorf("unknown reason %q", observation.Reason)
+	}
+	if (observation.Decision == profiles.DecisionHarnessError) != (observation.Reason == profiles.ReasonHarnessFailure) {
+		return fmt.Errorf("inconsistent harness failure decision and reason")
+	}
+	if observation.HarnessError != "" && observation.Decision != profiles.DecisionHarnessError {
+		return fmt.Errorf("harness error attached to a client observation")
+	}
+	return nil
 }
 
 func decodeStrictJSON(r io.Reader, dst any) error {
@@ -88,6 +120,10 @@ func decodeStrictJSON(r io.Reader, dst any) error {
 	}
 	if len(contents) > maxRequestBytes {
 		return fmt.Errorf("json body exceeds %d bytes", maxRequestBytes)
+	}
+	contents = bytes.TrimSpace(contents)
+	if len(contents) == 0 || contents[0] != '{' {
+		return fmt.Errorf("json body must be an object")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(contents))
 	decoder.DisallowUnknownFields()

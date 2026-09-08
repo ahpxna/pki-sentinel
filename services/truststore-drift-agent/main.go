@@ -429,6 +429,32 @@ func evaluateTrustStore(baseline Baseline, certs []*x509.Certificate, now time.T
 		observedBySPKI[spki][certHash] = struct{}{}
 	}
 
+	// Legacy SPKI-only entries still represent one root each. Assign their
+	// matches after exact DER matches, using stable certificate ordering. Merely
+	// having a legacy entry for a key must not exempt every sibling from drift.
+	legacyBudget := make(map[string]int)
+	for _, root := range baseline.Roots {
+		if root.CertHash == "" {
+			legacyBudget[root.SPKIHash]++
+		}
+	}
+	observedHashes := make([]string, 0, len(observedByCertHash))
+	for hash := range observedByCertHash {
+		observedHashes = append(observedHashes, hash)
+	}
+	sort.Strings(observedHashes)
+	legacyCertificates := make(map[string]bool)
+	for _, hash := range observedHashes {
+		if _, exact := knownByCertHash[hash]; exact {
+			continue
+		}
+		spki := spkiHash(observedByCertHash[hash])
+		if legacyBudget[spki] > 0 {
+			legacyCertificates[hash] = true
+			legacyBudget[spki]--
+		}
+	}
+
 	for _, c := range certs {
 		spki := spkiHash(c)
 		certHash := certificateHash(c)
@@ -440,14 +466,7 @@ func evaluateTrustStore(baseline Baseline, certs []*x509.Certificate, now time.T
 				result.Events = append(result.Events, DriftEvent{Timestamp: now, Event: "ROOT_POLICY_CHANGED", Subject: subject, SPKIHash: spki})
 			}
 		} else if candidates := knownBySPKI[spki]; len(candidates) > 0 {
-			legacyMatch := false
-			for _, known := range candidates {
-				if known.CertHash == "" {
-					legacyMatch = true
-					break
-				}
-			}
-			if !legacyMatch {
+			if !legacyCertificates[certHash] {
 				observed := rootEntry(c)
 				eventType := "ROOT_CERT_CHANGED"
 				for _, known := range candidates {
